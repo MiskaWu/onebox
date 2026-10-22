@@ -1,0 +1,24 @@
+---
+# A Quadlet .network unit (→ <name>-network.service creating the podman network).
+- name: Quadlet directory (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ podman_quadlet_dir }}"
+    state: directory
+    mode: "0755"
+  when: onebox_render_only | bool
+
+- name: Network unit {{ podman_quadlet_network_name }}
+  ansible.builtin.template:
+    src: network.j2
+    dest: "{{ onebox_root }}{{ podman_quadlet_dir }}/{{ podman_quadlet_network_name }}.network"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _podman_quadlet_network_unit
+
+- name: Let Quadlet regenerate the network service
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - _podman_quadlet_network_unit is changed
+    - not onebox_render_only | bool

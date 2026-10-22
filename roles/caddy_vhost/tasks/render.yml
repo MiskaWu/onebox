@@ -1,3 +1,50 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+- name: Assert the vhost parameters
+  ansible.builtin.assert:
+    that:
+      - caddy_vhost_name | length > 0
+      - caddy_vhost_entries | length > 0
+      - caddy_vhost_entries | selectattr('hostname', 'undefined') | list | length == 0
+      - caddy_vhost_entries | selectattr('upstream', 'undefined') | list | length == 0
+    fail_msg: "caddy_vhost needs caddy_vhost_name and entries that each have hostname and upstream"
+    quiet: true
+
+- name: Drop-in directories (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ edge_confd_dir }}"
+    - "{{ edge_portal_dir }}/cards"
+  when: onebox_render_only | bool
+
+- name: Vhost drop-in for {{ caddy_vhost_name }}
+  ansible.builtin.template:
+    src: vhost.caddy.j2
+    dest: "{{ onebox_root }}{{ edge_confd_dir }}/{{ caddy_vhost_name }}.caddy"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  notify: Reload caddy
+
+- name: Portal card for {{ caddy_vhost_name }}
+  ansible.builtin.copy:
+    content: |
+      [
+      {% for e in caddy_vhost_entries if e.portal | default(true) %}
+        {{ {'title': e.title | default(e.hostname), 'hostname': e.hostname,
+            'description': e.description | default('')} | to_json }}{{ ',' if not loop.last }}
+      {% endfor %}
+      ]
+    dest: "{{ onebox_root }}{{ edge_portal_dir }}/cards/{{ caddy_vhost_name }}.json"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _caddy_vhost_card
+
+- name: Rebuild the portal page
+  ansible.builtin.include_role:
+    name: caddy_edge
+    tasks_from: portal.yml
+  when: _caddy_vhost_card is changed or onebox_render_only | bool

@@ -1,0 +1,28 @@
+# Managed by onebox (roles/caddy_edge). Host-native edge proxy.
+[Unit]
+Description=Caddy edge proxy (onebox)
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+EnvironmentFile={{ edge_config_dir }}/caddy.env
+ExecStart={{ edge_bin }} run --environ --config {{ edge_config_dir }}/Caddyfile
+{% if edge_admin_mode == 'unix' %}
+# `caddy reload` does not discover the admin socket from the config: --address is required.
+ExecReload={{ edge_bin }} reload --config {{ edge_config_dir }}/Caddyfile --address unix/{{ edge_admin_socket }} --force
+# Home of the admin socket: recreated on every start, 0700 so other users cannot reach it.
+RuntimeDirectory=caddy
+RuntimeDirectoryMode=0700
+{% endif %}
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

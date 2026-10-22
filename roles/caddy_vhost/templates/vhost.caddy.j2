@@ -1,0 +1,31 @@
+# Managed by onebox (roles/caddy_vhost, {{ caddy_vhost_name }}). Imported by the edge Caddy.
+# No tls directive on purpose: TLS policy lives in the edge's `onebox_site` snippet.
+{% for e in caddy_vhost_entries %}
+{{ e.hostname }} {
+	import onebox_site
+{% if e.internal_only | default(edge_internal_only_default) %}
+	import onebox_internal_only {{ (e.allow_cidrs | default(onebox_lan_cidrs)) | join(' ') }}
+{% endif %}
+{% for d in e.directives | default([]) %}
+	{{ d }}
+{% endfor %}
+{% if e.lb_try_duration is defined or e.stream_close_delay is defined %}
+	reverse_proxy {{ e.upstream }} {
+{% if e.stream_close_delay is defined %}
+		# Caddy closes streams on every config reload; give WebSockets time to finish.
+		stream_close_delay {{ e.stream_close_delay }}
+{% endif %}
+{% if e.lb_try_duration is defined %}
+		# Retry while the upstream restarts instead of answering 502.
+		lb_try_duration {{ e.lb_try_duration }}
+		lb_try_interval {{ e.lb_try_interval | default('250ms') }}
+{% endif %}
+	}
+{% else %}
+	reverse_proxy {{ e.upstream }}
+{% endif %}
+}
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}

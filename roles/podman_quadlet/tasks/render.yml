@@ -1,0 +1,24 @@
+---
+- name: Assert the container parameters
+  ansible.builtin.assert:
+    that:
+      - podman_quadlet_name | length > 0
+      - podman_quadlet_image | length > 0
+    fail_msg: "podman_quadlet needs podman_quadlet_name and podman_quadlet_image"
+    quiet: true
+
+- name: Quadlet directory (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ podman_quadlet_dir }}"
+    state: directory
+    mode: "0755"
+  when: onebox_render_only | bool
+
+- name: Quadlet unit for {{ podman_quadlet_name }}
+  ansible.builtin.template:
+    src: container.j2
+    dest: "{{ onebox_root }}{{ podman_quadlet_dir }}/{{ podman_quadlet_name }}.container"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _podman_quadlet_unit

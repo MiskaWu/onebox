@@ -1,4 +1,98 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
-  ansible.builtin.include_tasks: render.yml
+- name: Caddy system group
+  ansible.builtin.group:
+    name: caddy
+    system: true
+
+- name: Caddy system user
+  ansible.builtin.user:
+    name: caddy
+    group: caddy
+    system: true
+    home: "{{ edge_data_dir }}"
+    shell: /usr/sbin/nologin
+    create_home: false
+
+# ── Build the binary in a container, run it on the host ──────────────────────────────
+- name: Write the build files
+  ansible.builtin.include_tasks: render_build.yml
+
+- name: Check whether the build image exists
+  ansible.builtin.command: podman image exists {{ edge_image }}
+  register: _edge_image_present
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Build Caddy with the required plugins
+  ansible.builtin.command: podman build --pull=missing -t {{ edge_image }} {{ edge_build_dir }}
+  register: _edge_build
+  changed_when: true
+  when: _edge_image_present.rc != 0 or _edge_dockerfile is changed
+
+- name: Read the installed Caddy version
+  ansible.builtin.command: "{{ edge_bin }} version"
+  register: _edge_host_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Copy the binary out of the image
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      cid=$(podman create {{ edge_image }})
+      trap 'podman rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+      podman cp "$cid:/usr/bin/caddy" {{ edge_bin }}.new
+      install -m 0755 -o root -g root {{ edge_bin }}.new {{ edge_bin }}
+      rm -f {{ edge_bin }}.new
+    executable: /bin/bash
+  register: _edge_extract
+  changed_when: true
+  when: >-
+    _edge_build is changed
+    or _edge_host_version.rc != 0
+    or ('v' ~ edge_caddy_version ~ ' ') not in (_edge_host_version.stdout | default('') ~ ' ')
+  notify: Restart caddy
+
+- name: Restore the SELinux label of the binary
+  ansible.builtin.command: restorecon {{ edge_bin }}
+  changed_when: false
+  when:
+    - _edge_extract is changed
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+# ── Configuration (validated with the binary that will run it) ───────────────────────
+- name: Assert the provided certificate exists
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: ["{{ edge_tls_cert_file }}", "{{ edge_tls_key_file }}"]
+  register: _edge_tls_files
+  when: edge_tls_mode == 'files'
+
+- name: Fail when the provided certificate is missing
+  ansible.builtin.assert:
+    that:
+      - _edge_tls_files.results | map(attribute='stat.exists') | min
+    fail_msg: "edge_tls_mode=files: put the certificate and key at {{ edge_tls_cert_file }} and {{ edge_tls_key_file }}"
+    quiet: true
+  when: edge_tls_mode == 'files'
+
+- name: Write the configuration files
+  ansible.builtin.include_tasks: render_config.yml
+
+- name: Open the web ports
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: firewall_open.yml
+  vars:
+    common_fw_rules: "{{ edge_firewall_rules }}"
+
+- name: Apply unit and binary changes before starting
+  ansible.builtin.meta: flush_handlers
+
+- name: Run Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    enabled: true
+    state: started

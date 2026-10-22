@@ -1,0 +1,42 @@
+---
+# DNS-01 provider catalog. Adding a provider = adding an entry here (or to
+# edge_dns_catalog_extra in the inventory), never a branch in a template.
+#   module      Go module xcaddy compiles in
+#   id          Caddy module ID (asserted inside the image at build time)
+#   secret_env  environment variable → inventory variable holding the secret value
+#   options     default lines inside `acme_dns <provider> { … }`
+_edge_dns_catalog:
+  route53:
+    module: github.com/caddy-dns/route53
+    id: dns.providers.route53
+    # The AWS SDK reads these from the environment; with an instance role, leave them empty
+    # by setting edge_route53_access_key_id: "" and the SDK falls back to the role.
+    secret_env:
+      AWS_ACCESS_KEY_ID: edge_route53_access_key_id
+      AWS_SECRET_ACCESS_KEY: edge_route53_secret_access_key
+    options: {}
+  cloudflare:
+    module: github.com/caddy-dns/cloudflare
+    id: dns.providers.cloudflare
+    # Token scoped to Zone:Read + DNS:Edit on the zones you need.
+    secret_env:
+      CF_API_TOKEN: edge_cloudflare_api_token
+    options:
+      api_token: "{env.CF_API_TOKEN}"
+  rfc2136:
+    module: github.com/caddy-dns/rfc2136
+    id: dns.providers.rfc2136
+    # Any RFC 2136 server with TSIG: BIND, Knot, PowerDNS, Windows DNS (with TSIG enabled).
+    secret_env:
+      RFC2136_KEY: edge_rfc2136_key
+    options:
+      key: "{env.RFC2136_KEY}"
+      key_alg: hmac-sha256
+
+_edge_dns: "{{ (_edge_dns_catalog | combine(edge_dns_catalog_extra))[edge_dns_provider] }}"
+_edge_modules: >-
+  {{ ([_edge_dns.module] if edge_tls_mode == 'acme_dns' else []) + edge_extra_modules }}
+_edge_secret_env: "{{ _edge_dns.secret_env if edge_tls_mode == 'acme_dns' else {} }}"
+
+# caddy-owned files: the user does not exist in render mode, so ownership is omitted there.
+_edge_owner: "{{ omit if onebox_render_only | bool else 'caddy' }}"

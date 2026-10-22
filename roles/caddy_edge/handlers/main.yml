@@ -1,0 +1,22 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not onebox_render_only | bool
+
+# Handlers run in definition order, not notification order. Restart must come first: a new
+# binary or environment only takes effect on a fresh exec, and a reload pushed to the old
+# process fails if the new config needs a module only the new binary has.
+- name: Restart caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: restarted
+  when: not onebox_render_only | bool
+
+# Config-only change: hot reload through the admin socket, connections stay up. Without an
+# admin API (edge_admin_mode: off) there is no reload, so restart instead.
+- name: Reload caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: "{{ 'reloaded' if edge_admin_mode == 'unix' else 'restarted' }}"
+  when: not onebox_render_only | bool

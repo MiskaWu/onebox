@@ -1,0 +1,10 @@
+# Managed by onebox (roles/podman_quadlet) → podman network {{ podman_quadlet_network_name }}
+[Network]
+NetworkName={{ podman_quadlet_network_name }}
+{% if podman_quadlet_network_subnet | length > 0 %}
+Subnet={{ podman_quadlet_network_subnet }}
+{% endif %}
+{% if podman_quadlet_network_internal %}
+# No route out of this network: members only talk to each other.
+Internal=true
+{% endif %}

@@ -1,0 +1,57 @@
+---
+- name: Caddy directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+    owner: "{{ _edge_owner }}"
+    group: "{{ _edge_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ edge_config_dir }}"
+    - "{{ edge_confd_dir }}"
+    - "{{ edge_data_dir }}"
+    - "{{ edge_portal_dir }}"
+    - "{{ edge_portal_dir }}/cards"
+
+- name: Systemd unit directory (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}/etc/systemd/system"
+    state: directory
+    mode: "0755"
+  when: onebox_render_only | bool
+
+- name: Provider environment file
+  ansible.builtin.template:
+    src: caddy.env.j2
+    dest: "{{ onebox_root }}{{ edge_config_dir }}/caddy.env"
+    owner: "{{ _edge_owner }}"
+    group: "{{ _edge_owner }}"
+    mode: "0600"
+  no_log: true
+  notify: Restart caddy
+
+- name: Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ onebox_root }}{{ edge_config_dir }}/Caddyfile"
+    owner: "{{ _edge_owner }}"
+    group: "{{ _edge_owner }}"
+    mode: "0644"
+    # `adapt` parses without provisioning modules (no DNS credentials needed at this point).
+    validate: "{{ omit if onebox_render_only | bool else edge_bin ~ ' adapt --adapter caddyfile --config %s' }}"
+  notify: Reload caddy
+
+- name: Systemd unit
+  ansible.builtin.template:
+    src: caddy.service.j2
+    dest: "{{ onebox_root }}/etc/systemd/system/caddy.service"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart caddy
+
+- name: Portal page
+  ansible.builtin.include_tasks: portal.yml
+  when: edge_portal_enabled | bool

@@ -1,0 +1,83 @@
+# Managed by onebox (roles/caddy_edge) — edits are overwritten on the next converge.
+#
+# Contract: services never edit this file. Each one drops exactly one file into
+# {{ edge_confd_dir }}/ (roles/caddy_vhost) whose site blocks `import onebox_site` and
+# contain no tls directive. TLS policy lives only here.
+{
+{% if edge_admin_mode == 'unix' %}
+	admin unix/{{ edge_admin_socket }}
+{% else %}
+	admin off
+{% endif %}
+{% if edge_tls_mode in ['acme_dns', 'acme_http'] %}
+	email {{ edge_acme_email }}
+{% if edge_acme_ca | length > 0 %}
+	acme_ca {{ edge_acme_ca }}
+{% endif %}
+{% endif %}
+{% if edge_tls_mode == 'acme_dns' %}
+{% set _opts = _edge_dns.options | combine(edge_dns_options) %}
+{% if _opts | length > 0 %}
+	acme_dns {{ edge_dns_provider }} {
+{% for k, v in _opts | dictsort %}
+		{{ k }} {{ v | string | to_json if (v is string and ' ' in v) else v }}
+{% endfor %}
+	}
+{% else %}
+	acme_dns {{ edge_dns_provider }}
+{% endif %}
+{% elif edge_tls_mode == 'internal' %}
+	local_certs
+{% endif %}
+}
+
+# Applied to every site (edge-owned and service vhosts).
+(onebox_site) {
+{% if edge_tls_mode == 'files' %}
+	tls {{ edge_tls_cert_file }} {{ edge_tls_key_file }}
+{% endif %}
+{% if edge_access_log %}
+	log {
+		output stdout
+		format json
+	}
+{% endif %}
+	header Strict-Transport-Security "max-age=31536000"
+}
+
+# LAN-only guard; sites call it as `import onebox_internal_only <cidrs…>`.
+(onebox_internal_only) {
+	@onebox_external not remote_ip {args[:]}
+	respond @onebox_external 403
+}
+
+import {{ edge_confd_dir }}/*.caddy
+
+{% if edge_portal_enabled %}
+{{ edge_portal_hostname }} {
+	import onebox_site
+{% if edge_internal_only_default %}
+	import onebox_internal_only {{ onebox_lan_cidrs | join(' ') }}
+{% endif %}
+	root * {{ edge_portal_dir }}
+	file_server
+}
+
+{% endif %}
+{% for site in edge_sites %}
+{{ site.hostname }} {
+	import onebox_site
+{% if site.internal_only | default(edge_internal_only_default) %}
+	import onebox_internal_only {{ (site.allow_cidrs | default(onebox_lan_cidrs)) | join(' ') }}
+{% endif %}
+{% if site.redirect is defined %}
+	redir {{ site.redirect }} permanent
+{% elif site.root is defined %}
+	root * {{ site.root }}
+	file_server
+{% elif site.upstream is defined %}
+	reverse_proxy {{ site.upstream }}
+{% endif %}
+}
+
+{% endfor %}

@@ -1,0 +1,17 @@
+---
+- name: Build directory
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ edge_build_dir }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0755"
+
+- name: Dockerfile (xcaddy build)
+  ansible.builtin.template:
+    src: Dockerfile.j2
+    dest: "{{ onebox_root }}{{ edge_build_dir }}/Dockerfile"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _edge_dockerfile

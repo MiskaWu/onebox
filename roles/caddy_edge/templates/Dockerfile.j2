@@ -1,0 +1,22 @@
+# Managed by onebox (roles/caddy_edge). Reproducible Caddy build.
+#
+# This image is never run: caddy_edge copies /usr/bin/caddy out of it and runs that binary
+# under host systemd. The container is only a hermetic compiler, so the exact build
+# (version + plugins) lives in version control and can be rebuilt at any time.
+{% if _edge_modules | length > 0 %}
+FROM docker.io/library/caddy:{{ edge_caddy_version }}-builder-alpine AS builder
+RUN xcaddy build v{{ edge_caddy_version }}{% for m in _edge_modules %} \
+      --with {{ m }}{% endfor %}
+
+
+FROM docker.io/library/caddy:{{ edge_caddy_version }}-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+{% if edge_tls_mode == 'acme_dns' %}
+# Fail the build if the DNS provider did not make it in.
+RUN caddy list-modules | grep -qx '{{ _edge_dns.id }}' && caddy version
+{% endif %}
+{% else %}
+# No plugins needed: the official build is used as is.
+FROM docker.io/library/caddy:{{ edge_caddy_version }}-alpine
+RUN caddy version
+{% endif %}

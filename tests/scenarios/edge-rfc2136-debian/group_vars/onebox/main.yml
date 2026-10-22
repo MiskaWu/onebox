@@ -1,0 +1,15 @@
+---
+# Edge only on Debian: DNS-01 against an on-prem DNS server (RFC 2136 + TSIG) through a
+# staging ACME directory.
+onebox_env: test
+onebox_os_family: Debian
+onebox_domain: lab.example.test
+onebox_host_ip: 192.0.2.40
+onebox_lan_cidrs: [192.0.2.0/24]
+onebox_components: [edge]
+edge_tls_mode: acme_dns
+edge_dns_provider: rfc2136
+edge_dns_options:
+  server: "ns1.example.test:53"
+  key_name: acme-update
+edge_acme_ca: https://acme-staging-v02.api.letsencrypt.org/directory

@@ -1,0 +1,27 @@
+---
+# Reusable primitive: one container as a rootful podman Quadlet unit managed by systemd.
+# Callers set these through `vars:` on include_role (see README.md).
+podman_quadlet_name: ""            # required; the service becomes <name>.service
+podman_quadlet_image: ""           # required; pin a tag (and ideally a digest)
+podman_quadlet_publish: []         # convention: loopback only, e.g. ["127.0.0.1:8000:8000"]
+podman_quadlet_env: {}             # non-secret environment
+# Secret environment: NAME → value. Stored as podman secrets and referenced with
+# `Secret=…,type=env`, so the values never appear in the unit file (which is world-readable)
+# or in `--diff` output. A changed value recreates the secret and restarts the container.
+podman_quadlet_secrets: {}
+podman_quadlet_volumes: []         # "name:/path", "/host/path:/path:Z" (Z is a no-op without SELinux)
+podman_quadlet_networks: []        # Quadlet network units, e.g. ["onebox-data.network"]
+podman_quadlet_network_aliases: []
+podman_quadlet_options: []         # extra raw [Container] lines (HealthCmd=, User=, …)
+podman_quadlet_service_options: [] # extra raw [Service] lines
+podman_quadlet_after: []           # [Unit] After=
+podman_quadlet_requires: []        # [Unit] Requires=
+podman_quadlet_auto_update: ""     # registry | local | "" (off: images are pinned here)
+podman_quadlet_timeout_start: 120
+podman_quadlet_dir: /etc/containers/systemd
+podman_quadlet_state_dir: /var/lib/onebox/quadlet
+
+# network.yml (a Quadlet .network unit)
+podman_quadlet_network_name: ""
+podman_quadlet_network_subnet: ""
+podman_quadlet_network_internal: false

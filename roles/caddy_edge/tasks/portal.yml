@@ -1,0 +1,31 @@
+---
+# Rebuild the portal from the card files caddy_vhost leaves in <portal>/cards/.
+# caddy_vhost includes this file after writing its card, so the page always lists exactly
+# the vhosts that exist — no hand-maintained list to forget.
+- name: Find the portal cards
+  ansible.builtin.find:
+    paths: "{{ onebox_root }}{{ edge_portal_dir }}/cards"
+    patterns: "*.json"
+  register: _edge_cards_found
+
+- name: Read the portal cards
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ _edge_cards_found.files | sort(attribute='path') }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: _edge_cards_raw
+
+- name: Collect the portal cards
+  ansible.builtin.set_fact:
+    _edge_portal_cards: >-
+      {{ _edge_cards_raw.results | map(attribute='content') | map('b64decode')
+         | map('from_json') | flatten }}
+
+- name: Portal page
+  ansible.builtin.template:
+    src: index.html.j2
+    dest: "{{ onebox_root }}{{ edge_portal_dir }}/index.html"
+    owner: "{{ _edge_owner }}"
+    group: "{{ _edge_owner }}"
+    mode: "0644"

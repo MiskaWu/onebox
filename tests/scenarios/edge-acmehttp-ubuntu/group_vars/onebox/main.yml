@@ -1,0 +1,12 @@
+---
+# Edge only on a public cloud VM: HTTP-01, no host firewall management (security groups),
+# public vhosts.
+onebox_env: test
+onebox_os_family: Debian
+onebox_domain: app.example.test
+onebox_host_ip: 203.0.113.50
+onebox_lan_cidrs: [203.0.113.0/24]
+onebox_components: [edge]
+common_firewall_backend: none
+edge_tls_mode: acme_http
+edge_internal_only_default: false

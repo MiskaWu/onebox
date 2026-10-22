@@ -1,0 +1,73 @@
+---
+# Write the unit, sync its secrets, (re)start it. Restarts only when the unit or a secret
+# changed, so converging an unchanged host never bounces a container.
+- name: Write the unit
+  ansible.builtin.include_tasks: render.yml
+
+- name: State directory for secret fingerprints
+  ansible.builtin.file:
+    path: "{{ podman_quadlet_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: podman_quadlet_secrets | length > 0
+
+# Only a SHA-256 of each value is kept on disk, never the value itself.
+- name: Read the stored secret fingerprints
+  ansible.builtin.slurp:
+    src: "{{ podman_quadlet_state_dir }}/{{ podman_quadlet_name }}.secrets"
+  register: _podman_quadlet_fp_file
+  failed_when: false
+  when: podman_quadlet_secrets | length > 0
+
+- name: Compare the secret fingerprints
+  ansible.builtin.set_fact:
+    _podman_quadlet_fp_new: >-
+      {{ dict(podman_quadlet_secrets.keys() | sort
+              | zip(podman_quadlet_secrets.keys() | sort | map('extract', podman_quadlet_secrets) | map('hash', 'sha256'))) }}
+    _podman_quadlet_fp_old: >-
+      {{ (_podman_quadlet_fp_file.content | b64decode | from_json)
+         if (_podman_quadlet_fp_file.content | default('') | length > 0) else {} }}
+  no_log: true
+  when: podman_quadlet_secrets | length > 0
+
+- name: Create or replace changed podman secrets
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      printf '%s' "$VALUE" | podman secret create --replace
+      {{ podman_quadlet_name }}-{{ item | lower | replace('_', '-') }} -
+    executable: /bin/bash
+  environment:
+    VALUE: "{{ podman_quadlet_secrets[item] }}"
+  loop: "{{ podman_quadlet_secrets.keys() | sort }}"
+  when: _podman_quadlet_fp_new[item] != _podman_quadlet_fp_old[item] | default('')
+  register: _podman_quadlet_secret_sync
+  changed_when: true
+  no_log: true
+
+- name: Store the new secret fingerprints
+  ansible.builtin.copy:
+    content: "{{ _podman_quadlet_fp_new | to_json }}"
+    dest: "{{ podman_quadlet_state_dir }}/{{ podman_quadlet_name }}.secrets"
+    owner: root
+    group: root
+    mode: "0600"
+  when: podman_quadlet_secrets | length > 0
+  no_log: true
+
+# A task, not a handler: the service must exist before the start task right below.
+- name: Let Quadlet regenerate the service  # noqa: no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _podman_quadlet_unit is changed
+
+# Skipped in --check: the unit file was not really written, so the generated service does
+# not exist yet and the task would fail for every service that was never deployed.
+- name: Run {{ podman_quadlet_name }}
+  ansible.builtin.systemd_service:
+    name: "{{ podman_quadlet_name }}.service"
+    state: >-
+      {{ 'restarted' if (_podman_quadlet_unit is changed or _podman_quadlet_secret_sync is changed) else 'started' }}
+  when: not ansible_check_mode

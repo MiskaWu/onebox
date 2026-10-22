@@ -1,0 +1,7 @@
+---
+# Same semantics as caddy_edge's handler; this role runs in each service's own play.
+- name: Reload caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: "{{ 'reloaded' if edge_admin_mode == 'unix' else 'restarted' }}"
+  when: not onebox_render_only | bool

@@ -51,8 +51,7 @@ init: ## Create inventories/$(ENV) from the example (ENV=<name>)
 	@test -n "$(ENV)" || { echo "usage: make init ENV=<name>" >&2; exit 1; }
 	@test ! -e inventories/$(ENV) || { echo "inventories/$(ENV) already exists" >&2; exit 1; }
 	cp -r inventories/example inventories/$(ENV)
-	rm -f inventories/$(ENV)/secrets.example.yml
-	install -m 600 inventories/example/secrets.example.yml inventories/$(ENV)/group_vars/onebox/secrets.yml
+	install -m 600 secrets.example.yml inventories/$(ENV)/group_vars/onebox/secrets.yml
 	sed -i 's/^onebox_env: .*/onebox_env: $(ENV)/' inventories/$(ENV)/group_vars/onebox/main.yml
 	@echo "Edit inventories/$(ENV)/group_vars/onebox/main.yml, then fill secrets with make secrets-gen / secrets-set."
 

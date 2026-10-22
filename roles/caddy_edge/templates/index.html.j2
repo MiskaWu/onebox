@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- Managed by onebox (roles/caddy_edge). Cards come from every service's vhost entries
+     (roles/caddy_vhost writes one card file per service); nothing here is typed by hand. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ edge_portal_title }}</title>
+<style>
+  :root { --bg: #f7f7f8; --card: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e3e3e6; --accent: #0a66c2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111214; --card: #1b1c1f; --fg: #ececee; --muted: #9a9aa0; --line: #2b2c30; --accent: #5aa9ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 16px; }
+  h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -.01em; }
+  p.sub { margin: 0 0 28px; color: var(--muted); }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px;
+       grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  a.card { display: block; padding: 16px 18px; background: var(--card); border: 1px solid var(--line);
+           border-radius: 10px; color: inherit; text-decoration: none; }
+  a.card:hover, a.card:focus-visible { border-color: var(--accent); }
+  .title { font-weight: 600; }
+  .host { color: var(--accent); font: 13px ui-monospace, "JetBrains Mono", monospace; overflow-wrap: anywhere; }
+  .desc { color: var(--muted); margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>{{ edge_portal_title }}</h1>
+  <p class="sub">Everything below is served through the edge proxy on {{ onebox_domain }}.</p>
+{% if _edge_portal_cards | default([]) | length > 0 %}
+  <ul>
+{% for card in _edge_portal_cards | sort(attribute='title') %}
+    <li><a class="card" href="https://{{ card.hostname }}/">
+      <div class="title">{{ card.title | e }}</div>
+      <div class="host">{{ card.hostname | e }}</div>
+{% if card.description | default('') | length > 0 %}
+      <div class="desc">{{ card.description | e }}</div>
+{% endif %}
+    </a></li>
+{% endfor %}
+  </ul>
+{% else %}
+  <p>No services published yet.</p>
+{% endif %}
+</main>
+</body>
+</html>

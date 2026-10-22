@@ -65,7 +65,7 @@ roles/<role>/
 ## 4. Secrets
 
 - Plain secrets live only in `inventories/<env>/group_vars/onebox/secrets.yml` (gitignored);
-  `inventories/example/secrets.example.yml` lists every key with a `CHANGE-ME…` value.
+  `secrets.example.yml` (repo root) lists every key with a `CHANGE-ME…` value.
   Optional `ansible-vault` encryption is supported (`VAULT=1`).
 - Tasks whose arguments contain a secret value use `no_log: true`.
 - `assert` tasks **never** use `no_log` (it hides `fail_msg`). Their `that:` and `fail_msg`

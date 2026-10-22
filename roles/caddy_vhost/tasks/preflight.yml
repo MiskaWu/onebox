@@ -1,3 +1,3 @@
 ---
-- name: No checks yet
+- name: Nothing to check before the service play passes its entries
   ansible.builtin.meta: noop

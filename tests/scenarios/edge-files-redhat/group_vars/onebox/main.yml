@@ -1,0 +1,18 @@
+---
+# Edge only: a certificate you provide (corporate CA wildcard), admin API off, edge-owned
+# static and redirect sites.
+onebox_env: test
+onebox_os_family: RedHat
+onebox_domain: corp.example.test
+onebox_host_ip: 192.0.2.30
+onebox_lan_cidrs: [192.0.2.0/24, 10.0.0.0/8]
+onebox_components: [edge]
+edge_tls_mode: files
+edge_admin_mode: "off"
+edge_access_log: false
+edge_sites:
+  - hostname: docs.corp.example.test
+    root: /srv/docs
+  - hostname: old.corp.example.test
+    redirect: https://corp.example.test{uri}
+    internal_only: false

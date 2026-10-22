@@ -47,10 +47,46 @@ casdoor_hostname: "sso.{{ onebox_domain }}"
 openbao_hostname: "bao.{{ onebox_domain }}"
 argocd_hostname: "argocd.{{ onebox_domain }}"
 
+# ── Edge contract (read by caddy_edge and by caddy_vhost in every service play) ──────
+edge_bin: /usr/local/bin/caddy
+edge_config_dir: /etc/caddy
+edge_confd_dir: /etc/caddy/conf.d
+edge_data_dir: /var/lib/caddy
+edge_portal_dir: /var/lib/caddy/portal
+# unix: admin API on a 0700 unix socket (enables zero-downtime `caddy reload`)
+# off : no admin API at all; every config change restarts Caddy
+edge_admin_mode: unix
+edge_admin_socket: /run/caddy/admin.sock
+# Vhosts are LAN-only (403 for other sources) unless an entry sets internal_only: false.
+edge_internal_only_default: true
+
 # ── Single sign-on ───────────────────────────────────────────────────────────────────
 # OIDC issuer the services trust. Defaults to the bundled Casdoor; point it at any OIDC
 # provider (Keycloak, Entra ID, Google Workspace, …) to run without the casdoor component.
 onebox_oidc_issuer: "{{ ('https://' ~ casdoor_hostname) if 'casdoor' in onebox_components else '' }}"
+
+# Every OIDC client the platform's services register at the identity provider. Casdoor
+# (when enabled) creates these applications; each service reads its own entry. Client IDs
+# and secrets are secrets: <name>_oidc_client_id / <name>_oidc_client_secret.
+onebox_oidc_clients:
+  gitlab:
+    title: GitLab
+    redirect_uris: ["https://{{ gitlab_hostname }}/users/auth/openid_connect/callback"]
+  argocd:
+    title: Argo CD
+    redirect_uris: ["https://{{ argocd_hostname }}/auth/callback"]
+  openbao:
+    title: OpenBao
+    redirect_uris:
+      - "https://{{ openbao_hostname }}/ui/vault/auth/oidc/oidc/callback"
+      - "http://localhost:8250/oidc/callback"   # `bao login -method=oidc` from a laptop
+
+# ── OpenBao ↔ External Secrets contract ──────────────────────────────────────────────
+openbao_kv_mount: kv
+openbao_k8s_auth_mount: kubernetes
+openbao_eso_role: external-secrets
+external_secrets_namespace: external-secrets
+external_secrets_service_account: external-secrets
 
 # ── Shared runtime facts ─────────────────────────────────────────────────────────────
 # OS family drives package names and paths (roles/common/vars/<family>.yml). Read from

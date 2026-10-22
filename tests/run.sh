@@ -6,6 +6,11 @@
 #   tests/run.sh render    render every role's files for each scenario into .render/<scenario>/
 #   tests/run.sh validate  check the rendered files: Quadlet dry-run, caddy validate, kubeconform
 #   tests/run.sh all       everything above, in that order
+#   tests/run.sh render validate   several stages in one call
+#
+# Environment:
+#   SCENARIOS="a b"   only these scenarios (default: every directory in tests/scenarios/)
+#   RENDER_ROOT=dir   where rendered files go (default: .render/)
 #
 # Scenarios live in tests/scenarios/<name>/ (an inventory each). They exist to push every
 # provider branch (OS family, TLS mode, DNS provider, optional components) through the
@@ -22,7 +27,7 @@ export ANSIBLE_CONFIG="${REPO_ROOT}/ansible.cfg"
 
 CADDY_IMAGE="docker.io/library/caddy:2.11.7"
 QUADLET_GENERATOR="${QUADLET_GENERATOR:-/usr/lib/systemd/system-generators/podman-system-generator}"
-RENDER_ROOT="${REPO_ROOT}/.render"
+RENDER_ROOT="${RENDER_ROOT:-${REPO_ROOT}/.render}"
 
 failures=0
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
@@ -30,6 +35,10 @@ ok() { printf '  \033[32mok\033[0m  %s\n' "$*"; }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; failures=$((failures + 1)); }
 
 scenarios() {
+  if [[ -n "${SCENARIOS:-}" ]]; then
+    tr ' ' '\n' <<<"$SCENARIOS" | grep -v '^$'
+    return
+  fi
   local d
   for d in tests/scenarios/*/; do
     d="${d%/}"
@@ -78,9 +87,9 @@ do_render() {
     mkdir -p "$out"
     if ansible-playbook -i "tests/scenarios/${s}" tests/render.yml \
         -e "onebox_root=${out}" >"${out}.log" 2>&1; then
-      ok "$(find "$out" -type f | wc -l) files → .render/${s}"
+      ok "$(find "$out" -type f | wc -l) files → ${out}"
     else
-      bad "render failed, see .render/${s}.log"
+      bad "render failed, see ${out}.log"
       tail -n 30 "${out}.log" | sed 's/^/      /'
     fi
   done
@@ -101,24 +110,47 @@ validate_quadlet() { # render dir
   fi
 }
 
+# The rendered Dockerfile is built (cached by its hash) so the validation runs the exact
+# binary a host would get — including DNS provider plugins — and the Dockerfile itself is
+# tested on the way.
+caddy_test_image() { # render dir → image name on stdout
+  local dockerfile="$1/var/lib/onebox/build/caddy/Dockerfile" tag
+  if [[ ! -f "$dockerfile" ]]; then
+    printf '%s\n' "$CADDY_IMAGE"
+    return
+  fi
+  tag="localhost/onebox-caddy-test:$(sha256sum "$dockerfile" | cut -c1-12)"
+  if ! podman image exists "$tag"; then
+    echo "  ...   building $tag (first time takes a few minutes)" >&2
+    podman build -q -t "$tag" -f "$dockerfile" "$(dirname "$dockerfile")" >/dev/null || return 1
+  fi
+  printf '%s\n' "$tag"
+}
+
 validate_caddy() { # render dir
   local dir="$1/etc/caddy"
   [[ -f "$dir/Caddyfile" ]] || return 0
-  if [[ -f "$1/.onebox-caddy-skip-validate" ]]; then
-    echo "  skip  caddy validate: $(cat "$1/.onebox-caddy-skip-validate")"
-    return 0
-  fi
   if ! command -v podman >/dev/null 2>&1; then
     echo "  skip  caddy validate: podman not installed"
     return 0
   fi
-  local out
-  if out="$(podman run --rm --network none -v "$dir:/etc/caddy:ro,Z" "$CADDY_IMAGE" \
-      caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1)"; then
-    ok "caddy validate"
+  # files mode references a certificate on disk: give validation a throwaway one
+  if grep -qE '^\s*tls /etc/caddy/certs/' "$dir/Caddyfile" && [[ ! -f "$dir/certs/fullchain.pem" ]]; then
+    mkdir -p "$dir/certs"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj "/CN=onebox-test" \
+      -keyout "$dir/certs/privkey.pem" -out "$dir/certs/fullchain.pem" >/dev/null 2>&1
+  fi
+  local image out
+  if ! image="$(caddy_test_image "$1")"; then
+    bad "caddy image build"
+    return
+  fi
+  if out="$(podman run --rm --network none -v "$dir:/etc/caddy:ro,Z" "$image" \
+      caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile --envfile /etc/caddy/caddy.env 2>&1)"; then
+    ok "caddy validate (${image##*/})"
   else
-    bad "caddy validate"
-    tail -n 15 <<<"$out" | sed 's/^/      /'
+    bad "caddy validate (${image##*/})"
+    grep -E '"level":"error"|Error' <<<"$out" | tail -n 8 | sed 's/^/      /'
   fi
 }
 
@@ -147,14 +179,17 @@ do_validate() {
   done
 }
 
-case "${1:-all}" in
-  lint) do_lint ;;
-  syntax) do_syntax ;;
-  render) do_render ;;
-  validate) do_validate ;;
-  all) do_lint; do_syntax; do_render; do_validate ;;
-  *) echo "usage: tests/run.sh [lint|syntax|render|validate|all]" >&2; exit 2 ;;
-esac
+[[ $# -gt 0 ]] || set -- all
+for stage in "$@"; do
+  case "$stage" in
+    lint) do_lint ;;
+    syntax) do_syntax ;;
+    render) do_render ;;
+    validate) do_validate ;;
+    all) do_lint; do_syntax; do_render; do_validate ;;
+    *) echo "usage: tests/run.sh [lint|syntax|render|validate|all]..." >&2; exit 2 ;;
+  esac
+done
 
 echo
 if [[ $failures -gt 0 ]]; then

@@ -1,4 +1,15 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+- name: Check that the edge proxy is installed
+  ansible.builtin.stat:
+    path: "{{ edge_config_dir }}/Caddyfile"
+  register: _caddy_vhost_edge
+
+- name: Assert the edge proxy is deployed first
+  ansible.builtin.assert:
+    that:
+      - _caddy_vhost_edge.stat.exists
+    fail_msg: "the edge proxy is not deployed yet: run `sudo make edge` before this service"
+    quiet: true
+
+- name: Write the drop-in and the portal card
   ansible.builtin.include_tasks: render.yml

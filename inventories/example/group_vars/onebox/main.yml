@@ -2,7 +2,7 @@
 # Environment configuration for the `example` environment.
 # Everything that differs between environments belongs in this directory; roles only carry
 # neutral defaults. Secrets go in secrets.yml next to this file (start from
-# ../../secrets.example.yml, never commit the real one).
+# secrets.example.yml at the repo root; never commit the real one).
 
 onebox_env: example
 onebox_domain: dev.example.com

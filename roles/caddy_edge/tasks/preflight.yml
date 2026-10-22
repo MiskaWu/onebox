@@ -1,3 +1,28 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+- name: Assert the TLS mode is known
+  ansible.builtin.assert:
+    that:
+      - edge_tls_mode in ['acme_dns', 'acme_http', 'internal', 'files']
+      - edge_admin_mode in ['unix', 'off']
+    fail_msg: "edge_tls_mode must be acme_dns, acme_http, internal or files; edge_admin_mode unix or off"
+    quiet: true
+
+- name: Assert the DNS provider is in the catalog
+  ansible.builtin.assert:
+    that:
+      - edge_dns_provider in (_edge_dns_catalog | combine(edge_dns_catalog_extra))
+    fail_msg: >-
+      edge_dns_provider '{{ edge_dns_provider }}' is unknown; built in:
+      {{ _edge_dns_catalog.keys() | join(', ') }} — add others through edge_dns_catalog_extra
+    quiet: true
+  when: edge_tls_mode == 'acme_dns'
+
+# Loop over variable NAMES only: a secret value must never become a loop item or part of
+# the assertion text (both are printed).
+- name: Assert the DNS provider credentials are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: "secrets.yml: set {{ item }} (make secrets-set KEY={{ item }}) for the {{ edge_dns_provider }} DNS provider"
+    quiet: true
+  loop: "{{ _edge_secret_env.values() | list }}"

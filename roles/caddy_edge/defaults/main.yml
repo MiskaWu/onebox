@@ -1,1 +1,52 @@
 ---
+# ── Caddy build ──────────────────────────────────────────────────────────────────────
+# Caddy is compiled from source with xcaddy inside a container (reproducible, plugins
+# included) and the binary is copied to the host: the edge runs under host systemd, not in
+# a container, because it fronts every runtime (podman and Kubernetes alike).
+edge_caddy_version: "2.11.7"
+edge_build_dir: /var/lib/onebox/build/caddy
+edge_image: "localhost/onebox-caddy:{{ edge_caddy_version }}"
+# Extra xcaddy plugins, e.g. ["github.com/mholt/caddy-l4"]. The DNS provider's plugin is
+# added automatically.
+edge_extra_modules: []
+
+# ── TLS ──────────────────────────────────────────────────────────────────────────────
+# acme_dns  : ACME DNS-01 through edge_dns_provider. Works for names that resolve only
+#             inside the LAN (no inbound needed) and can issue wildcards.
+# acme_http : ACME HTTP-01 / TLS-ALPN-01. The host must be reachable on 80/443 from the CA.
+# internal  : Caddy's own CA (`local_certs`). Clients must trust the root it creates
+#             (`make edge-root-ca` prints it).
+# files     : a certificate you provide (edge_tls_cert_file / edge_tls_key_file), typically
+#             a wildcard for *.onebox_domain from a corporate CA.
+edge_tls_mode: acme_dns
+edge_acme_email: "{{ onebox_admin_email }}"
+# Alternative ACME directory: Let's Encrypt staging, a private step-ca, Pebble, …
+edge_acme_ca: ""
+edge_tls_cert_file: /etc/caddy/certs/fullchain.pem
+edge_tls_key_file: /etc/caddy/certs/privkey.pem
+
+# DNS-01 provider (a key of the catalog in vars/main.yml, or of edge_dns_catalog_extra).
+edge_dns_provider: route53
+# Options written inside `acme_dns <provider> { … }`, merged over the catalog defaults,
+# e.g. {hosted_zone_id: Z0123456789} for route53 or {server: "ns1.example.com:53",
+# key_name: "acme"} for rfc2136.
+edge_dns_options: {}
+# Non-secret environment for the provider, e.g. {AWS_REGION: us-east-1}.
+edge_dns_env: {}
+# Register more providers without touching the role (same shape as the catalog).
+edge_dns_catalog_extra: {}
+
+# ── Sites owned by the edge itself ───────────────────────────────────────────────────
+# Services never go here: they ship a vhost through caddy_vhost. This is for the portal and
+# for static or redirect sites that belong to no service.
+edge_portal_enabled: true
+edge_portal_title: "{{ onebox_env }} services"
+edge_sites: []
+# Access log for every vhost (JSON to the journal).
+edge_access_log: true
+
+# Firewall: 80/tcp for redirects + HTTP-01, 443/tcp, 443/udp (HTTP/3).
+edge_firewall_rules:
+  - { port: 80, proto: tcp }
+  - { port: 443, proto: tcp }
+  - { port: 443, proto: udp }

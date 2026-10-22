@@ -1,0 +1,50 @@
+# Managed by onebox (roles/podman_quadlet) → systemd service {{ podman_quadlet_name }}.service
+# Convention: publish on 127.0.0.1 only; the edge proxy is the only way in from outside.
+[Unit]
+Description=Container {{ podman_quadlet_name }}
+Wants=network-online.target
+After=network-online.target
+{% for u in podman_quadlet_after %}
+After={{ u }}
+{% endfor %}
+{% for u in podman_quadlet_requires %}
+Requires={{ u }}
+{% endfor %}
+
+[Container]
+Image={{ podman_quadlet_image }}
+ContainerName={{ podman_quadlet_name }}
+{% for n in podman_quadlet_networks %}
+Network={{ n }}
+{% endfor %}
+{% for a in podman_quadlet_network_aliases %}
+NetworkAlias={{ a }}
+{% endfor %}
+{% for p in podman_quadlet_publish %}
+PublishPort={{ p }}
+{% endfor %}
+{% for k, v in podman_quadlet_env | dictsort %}
+Environment={{ k }}={{ v }}
+{% endfor %}
+{% for k in podman_quadlet_secrets.keys() | sort %}
+Secret={{ podman_quadlet_name }}-{{ k | lower | replace('_', '-') }},type=env,target={{ k }}
+{% endfor %}
+{% for v in podman_quadlet_volumes %}
+Volume={{ v }}
+{% endfor %}
+{% if podman_quadlet_auto_update | length > 0 %}
+AutoUpdate={{ podman_quadlet_auto_update }}
+{% endif %}
+{% for o in podman_quadlet_options %}
+{{ o }}
+{% endfor %}
+
+[Service]
+Restart=always
+TimeoutStartSec={{ podman_quadlet_timeout_start }}
+{% for o in podman_quadlet_service_options %}
+{{ o }}
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target
