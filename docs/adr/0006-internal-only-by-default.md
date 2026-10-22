@@ -13,7 +13,9 @@ another.
 ## Decision
 
 - **An L7 guard at the edge.** Every vhost imports `onebox_internal_only`, which answers 403 when
-  the client address is outside `onebox_lan_cidrs`. A service is opened explicitly per entry with
+  the client address is outside `onebox_internal_cidrs` (the LAN, plus the k3s pod network and
+  the tailnet when those components run — derived, so nobody has to remember to list them). A
+  service is opened explicitly per entry with
   `internal_only: false`, or widened with `allow_cidrs`. The global default is
   `edge_internal_only_default: true`.
 - **No bypass for HTTP.** Every service binds loopback; the edge is the only HTTP listener on a

@@ -19,12 +19,12 @@ Request paths:
                         └──────▲──────────────────────────▲────────────────────┘
                                │                          │
  people on the LAN /           │                          │
- mesh VPN ── https :443 ──►  ┌─┴──────────────────────────┴───────────────────────┐
+ mesh VPN ── https :443 ──►  ┌─┴──────────────────────────┴─────────────────────────┐
                              │ EDGE: Caddy under host systemd, sole owner of 80/443 │
-                             │   TLS for <domain> and every *.<domain> name        │
-                             │   403 outside onebox_lan_cidrs unless entry opens   │
-                             │   import conf.d/*.caddy — one drop-in per service   │
-                             └───┬───────────┬───────────┬───────────┬─────────────┘
+                             │   TLS for <domain> and every *.<domain> name         │
+                             │   403 outside onebox_internal_cidrs unless opened    │
+                             │   import conf.d/*.caddy — one drop-in per service    │
+                             └───┬───────────┬───────────┬───────────┬──────────────┘
               reverse_proxy      │ :8081     │ :8000     │ :8200     │ :31080
               127.0.0.1:<port>   ▼           ▼           ▼           ▼  (*.apps.<domain>, argocd.)
                              ┌────────┐  ┌────────┐  ┌────────┐  ┌───────────────────────────┐
@@ -113,7 +113,7 @@ The edge's main Caddyfile defines global TLS policy, the snippets `onebox_site` 
 | `title`, `description` | no | Portal card text |
 | `portal` | no | List on the portal page (default `true`; catch-alls set `false`) |
 | `internal_only` | no | Default `edge_internal_only_default` (`true`): 403 outside the allowed ranges |
-| `allow_cidrs` | no | Allowed ranges for this entry (default `onebox_lan_cidrs`) |
+| `allow_cidrs` | no | Allowed ranges for this entry (default `onebox_internal_cidrs`) |
 | `lb_try_duration` | no | Retry while the upstream restarts instead of answering 502 |
 | `stream_close_delay` | no | Keep WebSockets open across reloads for this long |
 | `directives` | no | Extra lines inside the site block |
@@ -194,8 +194,9 @@ KV layout: `platform/registry/<registry>/<tenant>`, `platform/datastore/<engine>
 External Secrets (to OpenBao) and Argo CD (to the OIDC issuer and to GitLab) leave the cluster
 and come back through the edge. They arrive with pod-network source addresses, so:
 
-- the pod CIDR must be allowed on those vhosts (in `onebox_lan_cidrs` or the entry's
-  `allow_cidrs`), or they receive 403;
+- the pod CIDR must be allowed on those vhosts, or they receive 403 — it is, automatically:
+  `onebox_internal_cidrs` = `onebox_lan_cidrs` + the pod network (when k3s runs and
+  `k3s_pods_trusted_by_edge`) + the tailnet (when tailscale runs) + `onebox_internal_extra_cidrs`;
 - the names must resolve inside the cluster (the wildcard record does this when the cluster's
   upstream resolver sees it);
 - with `edge_tls_mode: internal` or a private CA in `files` mode, in-cluster clients must be
