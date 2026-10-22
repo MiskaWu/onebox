@@ -1,0 +1,28 @@
+---
+# k3s reads config.yaml and registries.yaml only at start, so configuration changes need a
+# restart; the control plane recovers on its own. Not on the first install: the start task
+# then already uses the new files, and a second start right after the first only makes the
+# readiness wait race the API server's warm-up.
+- name: Restart k3s
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: restarted
+    daemon_reload: true
+  when:
+    - not onebox_render_only | bool
+    - _k3s_active_before.stdout | default('') | trim == 'active'
+
+# CoreDNS's `reload` plugin does not notice changes in imported files, so new *.server blocks
+# need a restart — after k3s has applied the ConfigMap, otherwise the restart reads the old one.
+- name: Wait until k3s applied the CoreDNS overrides
+  ansible.builtin.include_tasks: "{{ role_path }}/tasks/wait_addon.yml"
+  vars:
+    k3s_addon_file: "{{ _k3s_manifests_dir }}/onebox-coredns-custom.yaml"
+  listen: Reload CoreDNS overrides
+  when: not onebox_render_only | bool
+
+- name: Restart CoreDNS
+  ansible.builtin.command: "{{ _k3s_kubectl }} -n kube-system rollout restart deployment/coredns"
+  changed_when: true
+  listen: Reload CoreDNS overrides
+  when: not onebox_render_only | bool

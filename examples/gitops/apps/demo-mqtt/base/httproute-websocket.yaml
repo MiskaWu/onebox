@@ -1,0 +1,24 @@
+---
+# MQTT over WebSocket is HTTP (an Upgrade request): it takes the normal path — edge (TLS,
+# LAN guard) → gateway → here — and needs no new port. Clients connect to
+#   wss://demo-mqtt.apps.dev.example.com/mqtt
+# Every edge configuration reload closes WebSockets after a grace period
+# (k3s_gateway_stream_close_delay); clients must reconnect automatically.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: demo-mqtt-websocket
+spec:
+  parentRefs:
+    - name: onebox
+      namespace: gateway
+  hostnames:
+    - demo-mqtt.apps.dev.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mqtt
+      backendRefs:
+        - name: demo-mqtt
+          port: 8083

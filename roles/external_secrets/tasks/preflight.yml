@@ -1,3 +1,44 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Checks that need no running cluster. Runs from roles/preflight before anything changes.
+
+- name: Assert the store settings are complete
+  ansible.builtin.assert:
+    that:
+      - external_secrets_chart_sha256 | length == 64
+      - external_secrets_openbao_url is match('^https://')
+      - external_secrets_kv_version in ['v1', 'v2']
+      - external_secrets_service_account != external_secrets_controller_service_account
+    fail_msg: >-
+      external_secrets: chart sha256 must be set, the OpenBao URL must be https:// (it goes through the
+      edge), kv version v1 or v2, and the OpenBao identity account must differ from the controller's
+    quiet: true
+
+# With Caddy's internal CA (or a private CA in files mode) the store cannot verify OpenBao's
+# certificate without the CA; the symptom is a store that never becomes Ready with an x509 error.
+- name: Assert a CA is configured when the edge uses a private CA
+  ansible.builtin.assert:
+    that:
+      - external_secrets_ca_file | length > 0
+    fail_msg: >-
+      edge_tls_mode is internal: set external_secrets_ca_file (or onebox_edge_ca_file) to the edge's
+      root CA on the host, e.g. <edge data dir>/.local/share/caddy/pki/authorities/local/root.crt
+    quiet: true
+  when: (edge_tls_mode | default('acme_dns')) == 'internal'
+
+- name: Assert the pull-secret tenants are well-formed
+  ansible.builtin.assert:
+    that:
+      - external_secrets_registry_pull_tenants | length > 0
+      - external_secrets_registry_pull_tenants | selectattr('name', 'undefined') | list | length == 0
+      - _names | unique | length == _names | length
+      - _names | reject('match', '^[a-z][a-z0-9-]{0,62}$') | list | length == 0
+      - external_secrets_registry_pull_tenants | selectattr('registries', 'undefined') | list | length == 0
+        or external_secrets_registry_pull_default_registry | length > 0
+    fail_msg: >-
+      external_secrets_registry_pull_tenants: list at least one tenant {name: …} (unique, a valid label
+      value); tenants without `registries` use external_secrets_registry_pull_default_registry, which is
+      empty without the gitlab component
+    quiet: true
+  vars:
+    _names: "{{ external_secrets_registry_pull_tenants | map(attribute='name') | list }}"
+  when: external_secrets_registry_pull_enabled | bool

@@ -1,0 +1,14 @@
+---
+# The new version before promotion (the controller points the selector at it).
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-api-bg-preview
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: demo-api-bg
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,40 @@
+# Managed by onebox (roles/argo_rollouts) — k3s applies this file from its manifests directory.
+#
+# Argo Rollouts: how a new version takes over traffic (ADR 0015). Argo CD applies what Git
+# declares; Rollouts decides when the new ReplicaSet receives the traffic. Workloads replace a
+# Deployment with a Rollout (examples/gitops/apps/demo-api-bluegreen).
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: argo-rollouts
+  namespace: kube-system
+spec:
+  # argo-rollouts chart {{ argo_rollouts_chart_version }} (Argo Rollouts {{ argo_rollouts_app_version }}), downloaded with the sha256
+  # from the chart repository index and served by k3s.
+  chart: https://%{KUBERNETES_API}%/static/charts/{{ _argo_rollouts_chart_file }}
+  targetNamespace: {{ argo_rollouts_namespace }}
+  createNamespace: true
+  # Never uninstall-and-reinstall on a failed upgrade: running Rollouts keep their controller.
+  failurePolicy: abort
+  valuesContent: |-
+    installCRDs: true
+    # Uninstalling the release must not delete the CRDs — that would delete every Rollout and,
+    # with it, the workloads' ReplicaSets.
+    keepCRDs: true
+    controller:
+      replicas: {{ argo_rollouts_replicas }}
+      resources:
+        {{ argo_rollouts_resources | to_nice_yaml(indent=2) | indent(8) }}
+{% if argo_rollouts_gatewayapi_plugin_enabled | bool %}
+      # Weighted canaries: the plugin edits HTTPRoute backendRefs weights. Its RBAC on HTTPRoutes
+      # comes with the chart (providerRBAC.providers.gatewayAPI, on by default).
+      trafficRouterPlugins:
+        - name: {{ _argo_rollouts_plugin_name }}
+          location: {{ _argo_rollouts_plugin_url }}
+          sha256: {{ argo_rollouts_gatewayapi_plugin_sha256[argo_rollouts_arch] | default('unsupported-architecture') }}
+{% endif %}
+    # No resident UI: `kubectl argo rollouts get rollout <name> --watch` shows the same, with the
+    # caller's own Kubernetes permissions.
+    dashboard:
+      enabled: false

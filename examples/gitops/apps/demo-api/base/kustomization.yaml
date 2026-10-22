@@ -1,0 +1,16 @@
+---
+# demo-api: the smallest useful HTTP service — Deployment, Service, HTTPRoute, plus a secret
+# from OpenBao and a datastore address. Environment specifics (namespace, image tag, hostname)
+# live in overlays/<env>.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - httproute.yaml
+  - externalsecret.yaml
+  - postgres.yaml          # drop it (and the env var) if the service needs no database
+labels:
+  - pairs:
+      app.kubernetes.io/name: demo-api
+    includeSelectors: true

@@ -1,2 +1,104 @@
 ---
-k3s_gateway_vhost_entries: []
+# ── Traefik chart (https://traefik.github.io/charts) ─────────────────────────────────
+# The chart archive is downloaded by Ansible, verified against the digest published in the
+# repository's index.yaml, and served to k3s' helm-controller from k3s' own static directory:
+# installs and upgrades need no chart repository at reconcile time, and a re-published
+# archive fails loudly. Bump the version, the sha256 and the app version together, and diff
+# the values below against the new chart's values.schema.json — Helm silently ignores keys a
+# chart does not know (ADR 0015, 0023).
+# 42.x vs 41.x: the major only drops Kubernetes < 1.30 and changes Traefik Hub RBAC (unused);
+# 42.1.x carries Traefik v3.7.16 with the CVE fixes of 3.7.15/3.7.16 and expects Gateway API
+# v1.6.3 CRDs.
+k3s_gateway_chart_version: "42.1.2"
+k3s_gateway_app_version: v3.7.16   # informational: the chart's appVersion
+k3s_gateway_chart_url: "https://traefik.github.io/charts/traefik/traefik-{{ k3s_gateway_chart_version }}.tgz"
+k3s_gateway_chart_sha256: ecf9ac8bc0837e3260722566c2a49919332ca96b0b4e962405dfcfae51838699
+
+# ── Gateway API CRDs (Standard channel) ──────────────────────────────────────────────
+# Not shipped by the chart. Pinned by version and checksum (standard-install.yaml of the
+# release) and applied by k3s before the gateway's HelmChart is written. Upgrade together with
+# the chart: the Traefik release notes name the Gateway API version they are built against.
+k3s_gateway_gatewayapi_version: v1.6.3
+k3s_gateway_gatewayapi_sha256: 356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5
+
+# ── Names (a contract with every workload's route objects) ───────────────────────────
+k3s_gateway_namespace: gateway
+# The Gateway object HTTPRoutes attach to:
+#   parentRefs: [{name: <k3s_gateway_name>, namespace: <k3s_gateway_namespace>}]
+# Named after the platform, not the implementation: replacing Traefik keeps every route valid.
+k3s_gateway_name: onebox
+# GatewayClass and IngressClass (the default IngressClass: Ingress objects without
+# ingressClassName are served too).
+k3s_gateway_class: traefik
+
+# ── Host-network ports, all bound to 127.0.0.1 ───────────────────────────────────────
+# Traefik runs with hostNetwork, so every entrypoint is a real socket on the host. The HTTP
+# entrypoint is k3s_gateway_http_port (group_vars; the edge's upstream). The others have to
+# exist (health checks, metrics; the chart always declares websecure) and must not collide
+# with anything else on the host — they sit right above the HTTP port, outside k3s's
+# NodePort range.
+k3s_gateway_ping_port: "{{ k3s_gateway_http_port | int + 1 }}"
+k3s_gateway_metrics_port: "{{ k3s_gateway_http_port | int + 2 }}"
+k3s_gateway_websecure_port: "{{ k3s_gateway_http_port | int + 3 }}"
+
+# ── Edge forwarding (caddy_vhost entries) ────────────────────────────────────────────
+# Cluster workloads live under their own subtree, so a mistyped platform name never lands in
+# the cluster (ADR 0006). Caddy matches the most specific site first: gitlab., sso., bao.,
+# argocd.<domain> keep their own vhosts.
+k3s_gateway_apps_domain: "apps.{{ onebox_domain }}"
+# true: one catch-all site *.<k3s_gateway_apps_domain> → the gateway. New and short-lived
+#       environments need no platform change. Needs a wildcard certificate: edge_tls_mode
+#       acme_dns, internal, or files with a certificate covering *.<apps domain>.
+#       A wildcard covers one label: demo-api.apps… yes, a.b.apps… no.
+# false: only the names in k3s_gateway_hostnames are forwarded — required with acme_http,
+#       which cannot issue wildcards.
+k3s_gateway_edge_wildcard: true
+# Explicitly forwarded names, each a caddy_vhost entry without `upstream` (always the gateway):
+#   - hostname: demo-api.apps.dev.example.com
+#     title: Demo API              # shown on the portal (portal: false hides it)
+#     description: Example service
+#     internal_only: true          # default edge_internal_only_default
+# With the wildcard on, list a name here only to give it a portal card or different access.
+k3s_gateway_hostnames: []
+# Gateway restarts (upgrades, entrypoint changes) leave a few seconds without a listener: the
+# edge retries HTTP requests for this long instead of answering 502. Running WebSockets still
+# drop and must reconnect.
+k3s_gateway_lb_try_duration: 5s
+# Caddy closes streams (WebSockets) on every config reload; give them time to finish.
+k3s_gateway_stream_close_delay: 30s
+
+# Derived — consumed by caddy_vhost in site.yml. The catch-all has no portal card (a card
+# titled "*" means nothing).
+k3s_gateway_vhost_entries: >-
+  {{ (([{'hostname': '*.' ~ k3s_gateway_apps_domain, 'portal': false}] if k3s_gateway_edge_wildcard | bool else [])
+      + k3s_gateway_hostnames)
+     | map('combine', {'upstream': '127.0.0.1:' ~ k3s_gateway_http_port,
+                       'lb_try_duration': k3s_gateway_lb_try_duration,
+                       'stream_close_delay': k3s_gateway_stream_close_delay})
+     | list }}
+
+# ── Raw TCP entrypoints (opt-in, ADR 0015 option 3) ──────────────────────────────────
+# For clients that speak neither HTTP/WebSocket nor TLS. Each entry opens a host port outside
+# the edge (the edge only speaks HTTP), so the list is empty by default:
+#   - name: demo-mqtt          # entrypoint name = contract with the workload's IngressRouteTCP
+#     port: 1883               #   (spec.entryPoints: [demo-mqtt]); a mismatch silently creates
+#                              #   no router. Lowercase, ≤15 characters (a container port name).
+#     bind_ip: 192.0.2.10      # default k3s_gateway_tcp_bind_ip; never 0.0.0.0 by accident
+#     allowed_cidrs: [...]     # firewalld sources, default onebox_lan_cidrs; [] = any source
+# Without TLS a TCP router can only match HostSNI(`*`): one port serves exactly one backend.
+# These are host-native sockets (INPUT path), so firewalld really filters them (ADR 0007).
+# Adding or removing an entry recreates the Traefik pod: every connection drops for seconds.
+k3s_gateway_tcp_entrypoints: []
+# Address raw TCP entrypoints bind to by default. Must be an address of this host: an
+# entrypoint that cannot bind keeps the whole gateway from starting.
+k3s_gateway_tcp_bind_ip: "{{ onebox_host_ip }}"
+
+# ── Pod settings ─────────────────────────────────────────────────────────────────────
+k3s_gateway_log_level: INFO
+# The edge already writes an access log for every request.
+k3s_gateway_access_log: false
+# The host also runs the forge, the identity provider and the datastores, which Kubernetes
+# cannot see: the gateway gets a limit.
+k3s_gateway_resources:
+  requests: {cpu: 100m, memory: 64Mi}
+  limits: {cpu: "1", memory: 256Mi}

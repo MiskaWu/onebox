@@ -1,0 +1,58 @@
+---
+# Internal values. The paths are k3s's (roles/k3s keeps its data directory at the default).
+_argocd_manifests_dir: /var/lib/rancher/k3s/server/manifests
+_argocd_static_dir: /var/lib/rancher/k3s/server/static/charts
+_argocd_chart_file: "onebox-argo-cd-{{ argocd_chart_version }}.tgz"
+# Secret in kube-system holding the chart values that contain secrets (HelmChart valuesSecrets):
+# the HelmChart object itself stays free of credentials.
+_argocd_values_secret: argocd-onebox-values
+
+# Copy of the chart's shipped resource.exclusions (argo-cd chart = argocd_exclusions_reviewed_for)
+# with exactly one change: discovery.k8s.io/EndpointSlice is no longer excluded. An excluded
+# kind does not exist for Argo CD — not applied, not tracked, not diffed — so an EndpointSlice
+# in Git would be skipped while the application shows Synced and Healthy (ADR 0012).
+# Core Endpoints stays excluded. Safe only with annotation-based tracking (set explicitly in
+# the chart values): the EndpointSlice controller copies Service labels onto generated slices.
+_argocd_resource_exclusions:
+  - apiGroups: [""]
+    kinds: [Endpoints]
+  - apiGroups: [coordination.k8s.io]
+    kinds: [Lease]
+  - apiGroups: [authentication.k8s.io, authorization.k8s.io]
+    kinds:
+      - SelfSubjectReview
+      - TokenReview
+      - LocalSubjectAccessReview
+      - SelfSubjectAccessReview
+      - SelfSubjectRulesReview
+      - SubjectAccessReview
+  - apiGroups: [certificates.k8s.io]
+    kinds: [CertificateSigningRequest]
+  - apiGroups: [cert-manager.io]
+    kinds: [CertificateRequest]
+  - apiGroups: [cilium.io]
+    kinds: [CiliumIdentity, CiliumEndpoint, CiliumEndpointSlice]
+  - apiGroups: [kyverno.io, reports.kyverno.io, wgpolicyk8s.io]
+    kinds:
+      - PolicyReport
+      - ClusterPolicyReport
+      - EphemeralReport
+      - ClusterEphemeralReport
+      - AdmissionReport
+      - ClusterAdmissionReport
+      - BackgroundScanReport
+      - ClusterBackgroundScanReport
+      - UpdateRequest
+
+# The edge CA as PEM: read from the host at converge time; render mode uses a placeholder.
+_argocd_ca_pem: >-
+  {{ (_argocd_ca.content | b64decode)
+     if (_argocd_ca.content | default('')) | length > 0
+     else (_argocd_ca_placeholder if onebox_render_only | bool and argocd_ca_file | length > 0 else '') }}
+_argocd_ca_placeholder: "-----BEGIN CERTIFICATE-----\nrender-mode placeholder\n-----END CERTIFICATE-----\n"
+
+# HTTPS Git hosts that need the CA: every host of a credential template or tenant repository.
+_argocd_git_hosts: >-
+  {{ (argocd_repo_credentials | map(attribute='url') | list
+      + argocd_tenants | map(attribute='repo') | list)
+     | map('urlsplit', 'hostname') | select | unique | list }}

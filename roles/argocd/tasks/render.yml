@@ -1,3 +1,26 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Files this role writes (tests/render.yml runs this file in render mode).
+- name: Manifests directory (render mode only; k3s creates it on a real host)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _argocd_manifests_dir }}"
+    state: directory
+    mode: "0700"
+  when: onebox_render_only | bool
+
+# Holds the OIDC client and repository tokens: 0600 and no_log (a diff would print them).
+- name: Argo CD HelmChart and its secret values
+  ansible.builtin.template:
+    src: onebox-argocd.yaml.j2
+    dest: "{{ onebox_root }}{{ _argocd_manifests_dir }}/onebox-argocd.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"
+  no_log: true
+
+- name: Tenant projects and root Applications
+  ansible.builtin.template:
+    src: onebox-argocd-tenants.yaml.j2
+    dest: "{{ onebox_root }}{{ _argocd_manifests_dir }}/onebox-argocd-tenants.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"

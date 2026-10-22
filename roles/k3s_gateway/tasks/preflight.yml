@@ -1,3 +1,89 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Checks that need no running cluster. Runs from roles/preflight before anything changes.
+
+- name: Assert the version pins are consistent
+  ansible.builtin.assert:
+    that:
+      - k3s_gateway_chart_sha256 | length == 64
+      - k3s_gateway_gatewayapi_version is match('^v1\.[0-9]+\.[0-9]+$')
+      - k3s_gateway_gatewayapi_sha256 | length == 64
+    fail_msg: "k3s_gateway_chart_sha256 and k3s_gateway_gatewayapi_version/_sha256 must be set together with the versions"
+    quiet: true
+
+- name: Assert the edge forwards at least one name to the gateway
+  ansible.builtin.assert:
+    that:
+      - k3s_gateway_edge_wildcard | bool or k3s_gateway_hostnames | length > 0
+      - k3s_gateway_hostnames | reject('mapping') | list | length == 0
+      - k3s_gateway_hostnames | selectattr('hostname', 'undefined') | list | length == 0
+    fail_msg: >-
+      k3s_gateway_hostnames must be a list of mappings with a hostname (no upstream: it is always
+      the gateway), and with k3s_gateway_edge_wildcard false it must not be empty
+    quiet: true
+
+# acme_http (HTTP-01 / TLS-ALPN-01) cannot issue wildcard certificates (ADR 0005).
+- name: Assert the TLS mode can serve the wildcard site
+  ansible.builtin.assert:
+    that:
+      - not (k3s_gateway_edge_wildcard | bool) or (edge_tls_mode | default('acme_dns')) != 'acme_http'
+    fail_msg: >-
+      edge_tls_mode acme_http cannot obtain a certificate for *.{{ k3s_gateway_apps_domain }}. Use
+      acme_dns, internal or files (with a certificate covering it), or set
+      k3s_gateway_edge_wildcard: false and list every name in k3s_gateway_hostnames.
+    quiet: true
+
+- name: Assert the gateway's own ports are distinct and outside the NodePort range
+  ansible.builtin.assert:
+    that:
+      - _internal | unique | length == _internal | length
+      - _internal | select('ge', _nodeport_low | int) | select('le', _nodeport_high | int) | list | length == 0
+    fail_msg: >-
+      the gateway binds {{ _k3s_gateway_internal_ports | join(', ') }} on 127.0.0.1; they must be distinct
+      and outside the NodePort range {{ _nodeport_low }}-{{ _nodeport_high }} (kube-proxy DNATs NodePorts on
+      loopback too)
+    quiet: true
+  vars:
+    _internal: "{{ _k3s_gateway_internal_ports | map('int') | list }}"
+    # Owned by roles/k3s; not visible from this play unless set in the inventory.
+    _nodeport_low: "{{ (k3s_service_node_port_range | default('30000-30999')).split('-')[0] | int }}"
+    _nodeport_high: "{{ (k3s_service_node_port_range | default('30000-30999')).split('-')[1] | int }}"
+
+# The names become Traefik entrypoint names and container port names (≤15 characters, lower
+# case); duplicates would make YAML keep only the last one without a word.
+- name: Assert the TCP entrypoints are well-formed and unique
+  ansible.builtin.assert:
+    that:
+      - k3s_gateway_tcp_entrypoints | selectattr('name', 'undefined') | list | length == 0
+      - k3s_gateway_tcp_entrypoints | selectattr('port', 'undefined') | list | length == 0
+      - k3s_gateway_tcp_entrypoints | map(attribute='name') | reject('match', '^[a-z][a-z0-9-]{0,13}[a-z0-9]$') | list | length == 0
+      - _names | unique | length == _names | length
+      - _ports | unique | length == _ports | length
+      - _names | intersect(_k3s_gateway_reserved_names) | length == 0
+      - _ports | intersect(_k3s_gateway_internal_ports | map('int') | list) | length == 0
+      - _ports | select('ge', _nodeport_low | int) | select('le', _nodeport_high | int) | list | length == 0
+      - _ports | reject('ge', 1) | list | length == 0
+      - _ports | reject('le', 65535) | list | length == 0
+    fail_msg: >-
+      k3s_gateway_tcp_entrypoints: every entry needs name (lowercase, 2-15 characters) and port;
+      names and ports must be unique, must not reuse {{ _k3s_gateway_reserved_names | join('/') }} or the
+      gateway's own ports ({{ _k3s_gateway_internal_ports | join(', ') }}), and ports must lie outside the
+      NodePort range {{ _nodeport_low }}-{{ _nodeport_high }}
+    quiet: true
+  vars:
+    _names: "{{ k3s_gateway_tcp_entrypoints | map(attribute='name') | list }}"
+    _ports: "{{ k3s_gateway_tcp_entrypoints | map(attribute='port') | map('int') | list }}"
+    _nodeport_low: "{{ (k3s_service_node_port_range | default('30000-30999')).split('-')[0] | int }}"
+    _nodeport_high: "{{ (k3s_service_node_port_range | default('30000-30999')).split('-')[1] | int }}"
+  when: k3s_gateway_tcp_entrypoints | length > 0
+
+- name: Assert no TCP entrypoint binds every address
+  ansible.builtin.assert:
+    that:
+      - k3s_gateway_tcp_entrypoints | selectattr('bind_ip', 'defined') | map(attribute='bind_ip')
+        | select('in', ['0.0.0.0', '::', '']) | list | length == 0
+      - k3s_gateway_tcp_bind_ip not in ['0.0.0.0', '::', '']
+    fail_msg: >-
+      bind raw TCP entrypoints to one address of this host (k3s_gateway_tcp_bind_ip or bind_ip):
+      0.0.0.0 would silently follow every interface added later (VPN, a second NIC)
+    quiet: true
+  when: k3s_gateway_tcp_entrypoints | length > 0

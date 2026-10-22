@@ -1,0 +1,135 @@
+# Managed by onebox (roles/k3s_gateway) — k3s applies this file from its manifests directory.
+#
+# The cluster gateway (ADR 0015): our own Traefik, every entrypoint a host-network socket bound
+# explicitly to an address (127.0.0.1 for HTTP). The edge is its only client. No Service exists:
+# a Service is a possible NodePort or load balancer, i.e. a path into the cluster that bypasses
+# the edge.
+#
+# The file name (onebox-k3s-gateway) and the HelmChart name avoid "traefik": k3s's own addon
+# of that name is disabled, and a collision would hand this chart to k3s's disable logic.
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: k3s-gateway
+  namespace: kube-system
+spec:
+  # Traefik chart {{ k3s_gateway_chart_version }} (Traefik {{ k3s_gateway_app_version }}). Ansible downloaded the
+  # archive with the sha256 from the chart repository index; k3s serves it from its static
+  # directory, so reconciling never needs the chart repository.
+  chart: https://%{KUBERNETES_API}%/static/charts/{{ _k3s_gateway_chart_file }}
+  targetNamespace: {{ k3s_gateway_namespace }}
+  createNamespace: true
+  # Never uninstall-and-reinstall on a failed upgrade (the default): the old pod keeps serving,
+  # the HelmChart shows the failure, the next converge retries.
+  failurePolicy: abort
+  # Every key below was checked against the chart's values.schema.json; Helm silently ignores
+  # keys a chart does not know, so re-check on every chart bump.
+  valuesContent: |-
+    # hostNetwork + explicit addresses. Not hostPort + hostIP: this chart also uses hostIP as the
+    # listen address *inside* the pod, so with pod networking Traefik would bind the pod's own
+    # loopback and be unreachable; CNI portmap rules also vanish on firewalld reloads.
+    hostNetwork: true
+    deployment:
+      kind: Deployment
+      replicas: 1
+      # Resolve cluster names (Services) although the pod uses the host's network namespace.
+      dnsPolicy: ClusterFirstWithHostNet
+    # One node cannot run two pods holding the same host ports: stop the old pod first. The
+    # edge bridges the gap (lb_try_duration). rollingUpdate is removed explicitly: a deep merge
+    # would keep the chart's rollingUpdate defaults next to type Recreate.
+    updateStrategy:
+      type: Recreate
+      rollingUpdate: null
+    service:
+      enabled: false
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
+
+    ingressClass:
+      enabled: true
+      isDefaultClass: true
+      name: {{ k3s_gateway_class }}
+    gatewayClass:
+      enabled: true
+      name: {{ k3s_gateway_class }}
+    # The Gateway workloads attach their HTTPRoutes to. Its listener port must equal the web
+    # entrypoint port (the chart fails otherwise). Routes live in application namespaces, so the
+    # listener accepts every namespace — with the default (same namespace only) routes stay
+    # Accepted=False while every pod is green.
+    gateway:
+      enabled: true
+      name: {{ k3s_gateway_name }}
+      listeners:
+        web:
+          port: {{ k3s_gateway_http_port }}
+          protocol: HTTP
+          namespacePolicy:
+            from: All
+
+    providers:
+      kubernetesCRD:
+        enabled: true
+      kubernetesIngress:
+        enabled: true
+        # No Service to publish; report the loopback address instead, so Ingress objects get a
+        # status address and Argo CD shows them Healthy instead of Progressing forever.
+        publishedService:
+          enabled: false
+        ingressEndpoint:
+          ip: 127.0.0.1
+      kubernetesGateway:
+        enabled: true
+        statusAddress:
+          ip: 127.0.0.1
+          service:
+            enabled: false
+
+    ports:
+      # Ping/API entrypoint; the kubelet's probes use its hostIP.
+      traefik:
+        port: {{ k3s_gateway_ping_port }}
+        hostIP: 127.0.0.1
+        expose:
+          default: false
+      web:
+        port: {{ k3s_gateway_http_port }}
+        hostIP: 127.0.0.1
+        # Routers that name no entrypoint attach here only — never to a raw TCP entrypoint,
+        # where an HTTP route would quietly be reachable around the edge's LAN guard.
+        asDefault: true
+        expose:
+          default: false
+        # The only client is the edge on loopback; trust its X-Forwarded-* headers.
+        forwardedHeaders:
+          trustedIPs:
+            - 127.0.0.1/32
+      # TLS ends at the edge. The chart always declares this entrypoint; keep it on loopback.
+      websecure:
+        port: {{ k3s_gateway_websecure_port }}
+        hostIP: 127.0.0.1
+        expose:
+          default: false
+      metrics:
+        port: {{ k3s_gateway_metrics_port }}
+        hostIP: 127.0.0.1
+        expose:
+          default: false
+{% for ep in k3s_gateway_tcp_entrypoints %}
+      # Raw TCP entrypoint — contract: IngressRouteTCP spec.entryPoints: [{{ ep.name }}]
+      {{ ep.name }}:
+        port: {{ ep.port }}
+        hostIP: "{{ ep.bind_ip | default(k3s_gateway_tcp_bind_ip) }}"
+        protocol: TCP
+        expose:
+          default: false
+{% endfor %}
+
+    log:
+      level: {{ k3s_gateway_log_level }}
+    accessLog:
+      enabled: {{ k3s_gateway_access_log | bool | to_json }}
+
+    resources:
+      {{ k3s_gateway_resources | to_nice_yaml(indent=2) | indent(6) }}

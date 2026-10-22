@@ -1,4 +1,87 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Argo CD (ADR 0016): chart → tenant projects and root pointers → verified through the edge's
+# upstream (the gateway), the same path a browser takes.
+
+- name: Check that k3s is running
+  ansible.builtin.stat:
+    path: "{{ _argocd_static_dir }}"
+  register: _argocd_static
+
+- name: Assert k3s is deployed first
+  ansible.builtin.assert:
+    that:
+      - _argocd_static.stat.isdir | default(false)
+    fail_msg: "k3s is not running yet ({{ _argocd_static_dir }} is missing): run `sudo make k3s` first"
+    quiet: true
+
+- name: Read the CA bundle for the issuer and Git servers
+  ansible.builtin.slurp:
+    src: "{{ argocd_ca_file }}"
+  register: _argocd_ca
+  when: argocd_ca_file | length > 0
+
+- name: Argo CD chart archive (pinned, served by k3s)
+  ansible.builtin.get_url:
+    url: "{{ argocd_chart_url }}"
+    dest: "{{ _argocd_static_dir }}/{{ _argocd_chart_file }}"
+    checksum: "sha256:{{ argocd_chart_sha256 }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Write the manifests
   ansible.builtin.include_tasks: render.yml
+
+- name: Wait until k3s applied the HelmChart
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _argocd_manifests_dir }}/onebox-argocd.yaml"
+
+# Needs the AppProject/Application CRDs from the chart: k3s retries until they exist.
+- name: Wait until k3s applied the tenant projects
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _argocd_manifests_dir }}/onebox-argocd-tenants.yaml"
+    k3s_addon_timeout: "{{ argocd_ready_timeout }}"
+
+# Through the gateway with the real Host header: proves chart, Ingress, gateway routing and
+# the server, short of the edge itself.
+- name: Wait for Argo CD to answer through the gateway
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ k3s_gateway_http_port }}/healthz"
+    headers:
+      Host: "{{ argocd_hostname }}"
+    status_code: [200]
+  register: _argocd_health
+  until: _argocd_health.status == 200
+  retries: "{{ (argocd_ready_timeout | int / 10) | int }}"
+  delay: 10
+  failed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Fail when Argo CD does not answer
+  ansible.builtin.fail:
+    msg: |
+      http://127.0.0.1:{{ k3s_gateway_http_port }}/healthz with Host {{ argocd_hostname }} answered
+      {{ _argocd_health.status | default('nothing') }} after {{ argocd_ready_timeout }} s. Look at:
+        kubectl -n kube-system get helmchart argocd -o jsonpath='{.status}'   (install job, failures)
+        kubectl -n {{ argocd_namespace }} get pods,ingress                         (ImagePullBackOff, Pending)
+        kubectl get ingressclass                                          ({{ argocd_ingress_class }} must exist)
+      404 = the gateway runs but has no route for the host (Ingress missing or another class).
+  when:
+    - not ansible_check_mode
+    - _argocd_health.status | default(0) != 200
+
+- name: Explain how to sign in
+  ansible.builtin.debug:
+    msg:
+      - "Argo CD: https://{{ argocd_hostname }}"
+      - "{{ 'SSO: ' ~ argocd_oidc_issuer if argocd_oidc_enabled | bool else 'SSO is off (onebox_oidc_issuer is empty).' }}"
+      - >-
+        {{ 'Local admin: user admin, initial password in secret ' ~ argocd_namespace ~ '/argocd-initial-admin-secret'
+           if argocd_local_admin_enabled | bool else 'Local admin is disabled (break-glass: argocd_local_admin_enabled: true).' }}

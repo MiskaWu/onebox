@@ -1,6 +1,9 @@
 ---
 # onebox — one play per component, in dependency order.
 #
+# k3s runs before OpenBao on purpose: OpenBao's Kubernetes auth needs the cluster to exist, so
+# a fresh host converges in one pass.
+#
 # Every play is tagged with its component name, so `make <component>` (→ deploy.sh apply
 # --tags <component>) converges just that part. A component that is not listed in
 # onebox_components is skipped entirely (the `when:` on each role).
@@ -68,6 +71,15 @@
     - role: datastores
       when: "'datastores' in onebox_components"
 
+- name: Kubernetes (k3s, single node)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [k3s]
+  roles:
+    - role: k3s
+      when: "'k3s' in onebox_components"
+
 - name: OpenBao (secrets store)
   hosts: onebox
   become: true
@@ -118,15 +130,6 @@
   roles:
     - role: gitlab_runner
       when: "'gitlab-runner' in onebox_components"
-
-- name: Kubernetes (k3s, single node)
-  hosts: onebox
-  become: true
-  gather_facts: false
-  tags: [k3s]
-  roles:
-    - role: k3s
-      when: "'k3s' in onebox_components"
 
 - name: Cluster gateway (Traefik on loopback, Gateway API)
   hosts: onebox

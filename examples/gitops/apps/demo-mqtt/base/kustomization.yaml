@@ -1,0 +1,19 @@
+---
+# An MQTT broker reachable two ways:
+#   WebSocket   wss://demo-mqtt.apps.<domain>/mqtt — through the edge, zero new ports, the
+#               only option for browsers. Preferred.
+#   raw TCP     <host address>:1883 — a named entrypoint the platform opens on request
+#               (k3s_gateway_tcp_entrypoints); for clients that speak neither WebSocket nor TLS.
+# The broker never handles TLS: the edge terminates it for WebSocket; raw TCP is plaintext.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - httproute-websocket.yaml
+  - ingressroutetcp.yaml   # remove unless the platform declared the demo-mqtt entrypoint
+labels:
+  - pairs:
+      app.kubernetes.io/name: demo-mqtt
+    includeSelectors: true

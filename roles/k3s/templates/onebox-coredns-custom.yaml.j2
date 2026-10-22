@@ -1,0 +1,31 @@
+# Managed by onebox (roles/k3s) — k3s applies this file from its manifests directory.
+#
+# k3s' CoreDNS mounts the optional ConfigMap coredns-custom and imports every `*.server` key
+# as an extra server block. Each pinned hostname gets its own block, so nothing else in its
+# zone changes: other names fall through to the host's resolvers.
+# The ConfigMap is always rendered (empty when k3s_coredns_hosts is empty), so removing the
+# last entry really removes it from the cluster.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: onebox
+{% if k3s_coredns_hosts | length > 0 %}
+data:
+  onebox.server: |
+{% for name, address in k3s_coredns_hosts | dictsort %}
+    {{ name }}:53 {
+        hosts {
+            {{ address }} {{ name }}
+            fallthrough
+        }
+        forward . /etc/resolv.conf
+        cache 30
+    }
+{% endfor %}
+{% else %}
+data: {}
+{% endif %}

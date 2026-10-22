@@ -1,1 +1,77 @@
 ---
+# ── Chart (https://charts.external-secrets.io) ───────────────────────────────────────
+# Downloaded by Ansible with the digest from the repository index and served by k3s itself
+# (see roles/k3s_gateway/README.md, "How it is installed"). External Secrets ships a new minor
+# about every two weeks — continuous delivery, not semantic versioning: judge a bump by its
+# release notes (ADR 0023). This chart's CRDs serve external-secrets.io/v1 only (v1beta1 is
+# off and slated for removal): workloads write apiVersion external-secrets.io/v1.
+external_secrets_chart_version: "2.13.0"
+external_secrets_app_version: v2.13.0   # informational: the chart's appVersion
+external_secrets_chart_url: >-
+  {{ 'https://github.com/external-secrets/external-secrets/releases/download/helm-chart-'
+     ~ external_secrets_chart_version ~ '/external-secrets-' ~ external_secrets_chart_version ~ '.tgz' }}
+external_secrets_chart_sha256: f693a96f0d929a07e000dd39e68b92a1a1343c5bc440ebab091b03da30bcac3a
+
+# ── The store (contract with roles/openbao: group_vars openbao_kv_mount,
+#    openbao_k8s_auth_mount, openbao_eso_role, external_secrets_namespace,
+#    external_secrets_service_account) ───────────────────────────────────────────────
+# Name of the ClusterSecretStore every workload references:
+#   secretStoreRef: {kind: ClusterSecretStore, name: openbao}
+external_secrets_store_name: openbao
+# Through the edge: pods cannot reach the host's loopback, and the edge brings TLS and the LAN
+# guard (which must let the pod CIDR in — roles/k3s checks it). Pods must also be able to
+# resolve this name (roles/k3s: k3s_coredns_hosts when only the host can).
+external_secrets_openbao_url: "https://{{ openbao_hostname }}"
+external_secrets_kv_version: v2
+# PEM bundle to trust for that URL. Empty = the system roots (public ACME certificates).
+# Needed with edge_tls_mode internal (Caddy's root CA) or files with a private CA. The role
+# reads the file on the host at converge time and embeds it in the store.
+external_secrets_ca_file: "{{ onebox_edge_ca_file | default('') }}"
+# The controller runs under its own service account. external_secrets_service_account is a
+# separate, permission-less identity that only exists to log in to OpenBao — the controller's
+# token (which can write Secrets cluster-wide) is not what OpenBao trusts.
+external_secrets_controller_service_account: external-secrets-controller
+# Converge waits until the store reports Ready, i.e. External Secrets really logged in to
+# OpenBao. Fails with the store's own message otherwise.
+external_secrets_wait_ready: true
+external_secrets_ready_timeout: 300
+
+# ── Image pull secrets (ADR 0017) ────────────────────────────────────────────────────
+# One ClusterExternalSecret per tenant builds a dockerconfigjson Secret in every namespace
+# labelled <label>: <tenant>, including namespaces created later — no platform run needed.
+# Workloads reference it themselves (imagePullSecrets: [{name: registry-pull}]); the platform
+# patches no service accounts. Fail-closed: if one registry's credential is missing in
+# OpenBao, the Secret is not produced at all.
+external_secrets_registry_pull_enabled: false
+external_secrets_registry_pull_secret_name: registry-pull
+external_secrets_registry_pull_label: onebox/registry-pull
+external_secrets_registry_pull_refresh: 1h
+# Registry for tenants that list none of their own: the platform's GitLab registry when gitlab
+# is a component of this host (set it when the registry lives elsewhere).
+external_secrets_registry_pull_default_registry: "{{ gitlab_registry_hostname if 'gitlab' in onebox_components else '' }}"
+# OpenBao path of a tenant's credential for that registry: <prefix>/<tenant>, fields `username`
+# and `password` (a group deploy token with read_registry only — never a personal or
+# administrator token: every pod in a labelled namespace can read it).
+external_secrets_registry_pull_kv_prefix: platform/registry/internal
+# Tenants, each optionally with its own registry list (a docker config holds one credential
+# per registry host):
+#   - name: demo                 # label value; Secret produced in namespaces labelled with it
+#   - name: shop
+#     registries:
+#       - server: registry.dev.example.com
+#         kv_path: platform/registry/internal/shop
+#       - server: ghcr.io
+#         kv_path: platform/registry/ghcr/shop
+external_secrets_registry_pull_tenants: []
+
+# ── Pods ─────────────────────────────────────────────────────────────────────────────
+# The host also runs services Kubernetes cannot see: every component gets a limit.
+external_secrets_resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 500m, memory: 256Mi}
+external_secrets_webhook_resources:
+  requests: {cpu: 20m, memory: 32Mi}
+  limits: {cpu: 200m, memory: 128Mi}
+external_secrets_cert_controller_resources:
+  requests: {cpu: 20m, memory: 32Mi}
+  limits: {cpu: 200m, memory: 128Mi}

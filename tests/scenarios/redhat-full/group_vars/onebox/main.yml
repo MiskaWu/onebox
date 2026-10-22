@@ -5,7 +5,7 @@ onebox_env: test
 onebox_os_family: RedHat
 onebox_domain: dev.example.test
 onebox_host_ip: 192.0.2.10
-onebox_lan_cidrs: [192.0.2.0/24]
+onebox_lan_cidrs: [192.0.2.0/24, 10.42.0.0/16]   # + k3s pods
 onebox_components:
   - operators
   - storage

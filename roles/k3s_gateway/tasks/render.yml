@@ -1,3 +1,18 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Files this role writes (tests/render.yml runs this file in render mode). The Gateway API and
+# Traefik CRD bundles are downloaded/extracted in main.yml: they are upstream files, not
+# templates, and need the network.
+- name: Manifests directory (render mode only; k3s creates it on a real host)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _k3s_gateway_manifests_dir }}"
+    state: directory
+    mode: "0700"
+  when: onebox_render_only | bool
+
+- name: Cluster gateway HelmChart
+  ansible.builtin.template:
+    src: onebox-k3s-gateway.yaml.j2
+    dest: "{{ onebox_root }}{{ _k3s_gateway_manifests_dir }}/onebox-k3s-gateway.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"

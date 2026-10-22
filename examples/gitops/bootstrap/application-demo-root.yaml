@@ -1,0 +1,26 @@
+---
+# Reference copy — do not apply. roles/argocd renders the root pointer of every tenant: it lives
+# with the platform because it cannot live in the repository it points at, and it belongs to the
+# platform-owned project platform-roots, which may only create Applications in the argocd
+# namespace. Every file in applications/ becomes a child Application.
+#
+# No resources-finalizer on purpose: removing the tenant (or this pointer) must not cascade into
+# the tenant's workloads.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-root
+  namespace: argocd
+spec:
+  project: platform-roots
+  source:
+    repoURL: https://gitlab.dev.example.com/demo/gitops.git
+    targetRevision: main
+    path: applications
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: false

@@ -1,0 +1,18 @@
+---
+# Cluster objects k3s applies from its auto-deploy directory.
+
+- name: Manifests directory (render mode only; k3s creates it on a real host)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _k3s_manifests_dir }}"
+    state: directory
+    mode: "0700"
+  when: onebox_render_only | bool
+
+- name: CoreDNS overrides for platform hostnames
+  ansible.builtin.template:
+    src: onebox-coredns-custom.yaml.j2
+    dest: "{{ onebox_root }}{{ _k3s_manifests_dir }}/onebox-coredns-custom.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"
+  notify: Reload CoreDNS overrides

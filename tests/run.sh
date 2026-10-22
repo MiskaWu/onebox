@@ -168,6 +168,22 @@ validate_k8s() { # render dir
   fi
 }
 
+# examples/ is a GitOps repository skeleton, not rendered by Ansible: validate it as-is.
+validate_examples() {
+  local files=()
+  mapfile -t files < <(find examples -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | sort)
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  step "validate: examples"
+  if kubeconform -strict -summary -skip Kustomization -kubernetes-version 1.33.0 \
+      -schema-location default \
+      -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+      "${files[@]}"; then
+    ok "kubeconform examples (${#files[@]} files)"
+  else
+    bad "kubeconform examples"
+  fi
+}
+
 do_validate() {
   local s
   for s in $(scenarios); do
@@ -177,6 +193,7 @@ do_validate() {
     validate_caddy "${RENDER_ROOT}/${s}"
     validate_k8s "${RENDER_ROOT}/${s}"
   done
+  validate_examples
 }
 
 [[ $# -gt 0 ]] || set -- all

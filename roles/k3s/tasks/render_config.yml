@@ -1,0 +1,47 @@
+---
+# Host-side configuration read by k3s at start.
+
+# /etc/rancher and /etc/rancher/k3s are group-traversable for the admin group and closed to
+# everybody else: members reach the kubeconfig k3s writes there, other users cannot even list
+# the directory. config.yaml.d must exist and be group-readable too — kubectl (a k3s symlink)
+# scans it and prints "permission denied" otherwise.
+- name: Configuration directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _k3s_dir }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ _k3s_group }}"
+    mode: "0750"
+  loop:
+    - "{{ k3s_config_dir | dirname }}"
+    - "{{ k3s_config_dir }}"
+    - "{{ k3s_config_dir }}/config.yaml.d"
+  loop_control:
+    loop_var: _k3s_dir
+
+- name: The k3s configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ onebox_root }}{{ k3s_config_dir }}/config.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ _k3s_group }}"
+    mode: "0640"
+  notify: Restart k3s
+
+- name: Registry configuration
+  ansible.builtin.template:
+    src: registries.yaml.j2
+    dest: "{{ onebox_root }}{{ k3s_config_dir }}/registries.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"
+  no_log: true
+  notify: Restart k3s
+  when: _k3s_registries | length > 0
+
+- name: Remove the registry configuration when no registry is configured
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ k3s_config_dir }}/registries.yaml"
+    state: absent
+  notify: Restart k3s
+  when: _k3s_registries | length == 0

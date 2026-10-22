@@ -1,0 +1,46 @@
+---
+# No hostNetwork, no hostPort: the cluster gateway owns the host side. A pod holding the port
+# the gateway's entrypoint needs keeps the whole gateway (every HTTP route) from starting.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-mqtt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-mqtt
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-mqtt
+    spec:
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: broker
+          image: docker.io/library/eclipse-mosquitto
+          ports:
+            - name: mqtt
+              containerPort: 1883
+            - name: mqtt-ws
+              containerPort: 8083
+          readinessProbe:
+            tcpSocket:
+              port: mqtt
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /mosquitto/config/mosquitto.conf
+              subPath: mosquitto.conf
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: demo-mqtt

@@ -1,0 +1,21 @@
+---
+# k8s group settings for the full scenario (roles k3s, k3s_gateway, external_secrets, argocd,
+# argo_rollouts). The edge runs Caddy's internal CA here, so the cluster roles get its root.
+onebox_edge_ca_file: /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+k3s_gateway_tcp_entrypoints:
+  - name: demo-mqtt
+    port: 1883
+external_secrets_registry_pull_enabled: true
+external_secrets_registry_pull_tenants:
+  - name: demo
+argocd_rbac_admins: [platform-admins]
+argocd_rbac_syncers:
+  - {subject: demo-developers, tenant: demo}
+argocd_tenants:
+  - name: demo
+    repo: https://gitlab.dev.example.test/demo/gitops.git
+argocd_repo_credentials:
+  - name: demo-gitops
+    url: https://gitlab.dev.example.test/demo/gitops.git
+    username: argocd-demo
+    password_var: argocd_repo_demo_gitops_token

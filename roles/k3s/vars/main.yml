@@ -1,0 +1,36 @@
+---
+# Internal values derived from defaults/main.yml. Not meant to be overridden.
+
+# Group ownership of the configuration tree; the group does not exist in render mode.
+_k3s_group: "{{ omit if onebox_render_only | bool else k3s_admin_group }}"
+
+# Release artifacts. The tag contains "+" (v1.36.5+k3s1), which must be URL-encoded.
+_k3s_release_url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}"
+_k3s_binary_name: "{{ 'k3s' if k3s_arch == 'amd64' else 'k3s-' ~ k3s_arch }}"
+_k3s_install_script_url: "https://raw.githubusercontent.com/k3s-io/k3s/{{ k3s_version | urlencode }}/install.sh"
+# Downloads that only live for the duration of an install (ADR 0014: no resident installer).
+_k3s_staging_dir: /var/tmp/onebox-k3s
+
+_k3s_manifests_dir: "{{ k3s_data_dir }}/server/manifests"
+_k3s_kubectl: "{{ k3s_bin }} kubectl --kubeconfig {{ k3s_kubeconfig }}"
+
+# config.yaml as a dictionary: k3s_extra_config wins on a key collision.
+_k3s_config: >-
+  {{ {
+       'write-kubeconfig': k3s_kubeconfig,
+       'write-kubeconfig-mode': '0640',
+       'write-kubeconfig-group': k3s_admin_group,
+       'cluster-cidr': k3s_cluster_cidr,
+       'service-cidr': k3s_service_cidr,
+       'service-node-port-range': k3s_service_node_port_range,
+       'tls-san': k3s_tls_san,
+       'disable': k3s_disable,
+       'secrets-encryption': k3s_secrets_encryption | bool,
+       'selinux': k3s_selinux | bool,
+     } | combine(k3s_extra_config) }}
+
+# registries.yaml: host → settings. Node-wide credentials only ever apply to the GitLab
+# registry (template), never to the extra registries.
+_k3s_registries: >-
+  {{ ({gitlab_registry_hostname: {'ca_file': k3s_registry_ca_file}} if k3s_registry_enabled | bool else {})
+     | combine(k3s_registries_extra) }}

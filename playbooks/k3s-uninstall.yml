@@ -1,0 +1,17 @@
+---
+# Remove k3s and everything in the cluster (preview by default).
+#
+#   ansible-playbook -i inventories/<env> playbooks/k3s-uninstall.yml                 # preview
+#   ansible-playbook -i inventories/<env> playbooks/k3s-uninstall.yml \
+#     -e k3s_uninstall_confirm=<env>                                                  # do it
+#
+# See roles/k3s/tasks/uninstall.yml for what is and is not removed.
+- name: Uninstall k3s
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Run the k3s uninstall operation
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: uninstall.yml

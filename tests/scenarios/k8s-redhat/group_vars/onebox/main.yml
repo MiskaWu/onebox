@@ -1,0 +1,88 @@
+---
+# k8s group, RHEL family: every cluster component, Caddy's internal CA (so every CA branch is
+# rendered), registry trust and node-wide credentials, a raw TCP entrypoint, explicit gateway
+# hostnames next to the wildcard, pull secrets for two tenants, SSO-only Argo CD with tenants.
+onebox_env: test
+onebox_os_family: RedHat
+onebox_domain: dev.example.test
+onebox_host_ip: 192.0.2.10
+# The pod CIDR counts as LAN: pods call internal-only vhosts through the edge.
+onebox_lan_cidrs: [192.0.2.0/24, 10.42.0.0/16]
+onebox_components:
+  - edge
+  - k3s
+  - k3s-gateway
+  - external-secrets
+  - argocd
+  - argo-rollouts
+edge_tls_mode: internal
+# An issuer outside this host (no casdoor component).
+onebox_oidc_issuer: https://login.example.test/realms/platform
+onebox_edge_ca_file: /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+
+# roles/k3s
+k3s_registry_enabled: true
+k3s_registry_username: k3s-pull
+k3s_registries_extra:
+  mirror.example.test:
+    endpoint: [https://mirror.example.test:5000]
+    ca_file: /etc/pki/onebox/mirror-ca.pem
+k3s_extra_config:
+  node-ip: 192.0.2.10
+  kubelet-arg: [max-pods=150]
+
+# roles/k3s_gateway
+k3s_gateway_hostnames:
+  - hostname: demo-api.apps.dev.example.test
+    title: Demo API
+    description: Example HTTP service
+k3s_gateway_tcp_entrypoints:
+  - name: demo-mqtt
+    port: 1883
+  - name: demo-raw
+    port: 7000
+    bind_ip: 192.0.2.11
+    allowed_cidrs: []
+
+# roles/external_secrets
+external_secrets_registry_pull_enabled: true
+# GitLab runs on another host in this scenario.
+external_secrets_registry_pull_default_registry: registry.dev.example.test
+external_secrets_registry_pull_tenants:
+  - name: demo
+  - name: shop
+    registries:
+      - server: registry.dev.example.test
+        kv_path: platform/registry/internal/shop
+      - server: ghcr.io
+        kv_path: platform/registry/ghcr/shop
+
+# roles/argocd
+argocd_local_admin_enabled: false
+argocd_rbac_default_role: ""
+argocd_rbac_admins: [platform-admins, alice@example.com]
+argocd_rbac_readers: [auditors]
+argocd_rbac_syncers:
+  - {subject: demo-developers, tenant: demo}
+  - {subject: bob@example.com, tenant: shop}
+argocd_tenants:
+  - name: demo
+    repo: https://gitlab.dev.example.test/demo/gitops.git
+  - name: shop
+    repo: https://gitlab.dev.example.test/shop/gitops.git
+    path: clusters/dev/applications
+    revision: release
+    source_repos: [https://charts.example.test]
+    namespaces: [shop-*, shop-shared]
+    cluster_resources:
+      - {group: "", kind: Namespace}
+      - {group: rbac.authorization.k8s.io, kind: ClusterRole}
+argocd_repo_credentials:
+  - name: demo-gitops
+    url: https://gitlab.dev.example.test/demo/gitops.git
+    username: argocd-demo
+    password_var: argocd_repo_demo_gitops_token
+  - name: shop
+    url: https://gitlab.dev.example.test/shop/
+    username: argocd-shop
+    password_var: argocd_repo_shop_token

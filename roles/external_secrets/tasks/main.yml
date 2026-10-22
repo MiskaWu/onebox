@@ -1,4 +1,102 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# External Secrets Operator + the ClusterSecretStore that points at OpenBao (ADR 0017), then a
+# check that External Secrets really logged in to OpenBao.
+
+- name: Check that k3s is running
+  ansible.builtin.stat:
+    path: "{{ _external_secrets_static_dir }}"
+  register: _external_secrets_static
+
+- name: Assert k3s is deployed first
+  ansible.builtin.assert:
+    that:
+      - _external_secrets_static.stat.isdir | default(false)
+    fail_msg: "k3s is not running yet ({{ _external_secrets_static_dir }} is missing): run `sudo make k3s` first"
+    quiet: true
+
+- name: Read the CA bundle for OpenBao's certificate
+  ansible.builtin.slurp:
+    src: "{{ external_secrets_ca_file }}"
+  register: _external_secrets_ca
+  when: external_secrets_ca_file | length > 0
+
+- name: External Secrets chart archive (pinned, served by k3s)
+  ansible.builtin.get_url:
+    url: "{{ external_secrets_chart_url }}"
+    dest: "{{ _external_secrets_static_dir }}/{{ _external_secrets_chart_file }}"
+    checksum: "sha256:{{ external_secrets_chart_sha256 }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Write the manifests
   ansible.builtin.include_tasks: render.yml
+
+- name: Wait until k3s applied the HelmChart
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _external_secrets_manifests_dir }}/onebox-external-secrets.yaml"
+
+# Applying the store needs the CRDs *and* a webhook with endpoints ("CRD registered" is not
+# enough: the admission webhook rejects the store until its pod is Ready). k3s retries on its
+# own; this waits for it, covering the chart install and the image pulls of a first run.
+- name: Wait until k3s applied the store
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _external_secrets_manifests_dir }}/onebox-external-secrets-store.yaml"
+    k3s_addon_timeout: 600
+
+# Ready means External Secrets reached OpenBao through the edge, trusted its certificate and
+# logged in with the identity account. A Valid store still does not prove that a value syncs
+# (policy paths) — the end-to-end check is a test target that writes and reads back a value.
+- name: Wait for the store to become Ready
+  ansible.builtin.command: >-
+    {{ _external_secrets_kubectl }} get clustersecretstore {{ external_secrets_store_name }}
+    -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}'
+  register: _external_secrets_ready
+  until: _external_secrets_ready.stdout == 'True'
+  retries: "{{ (external_secrets_ready_timeout | int / 5) | int }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - external_secrets_wait_ready | bool
+    - not ansible_check_mode
+
+- name: Read the store's own explanation
+  ansible.builtin.command: >-
+    {{ _external_secrets_kubectl }} get clustersecretstore {{ external_secrets_store_name }}
+    -o 'jsonpath={range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+  register: _external_secrets_conditions
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - external_secrets_wait_ready | bool
+    - not ansible_check_mode
+    - _external_secrets_ready.stdout | default('') != 'True'
+
+- name: Fail when the store is not Ready
+  ansible.builtin.fail:
+    msg: |
+      ClusterSecretStore {{ external_secrets_store_name }} is not Ready:
+        {{ _external_secrets_conditions.stdout | default('(no status)') }}
+      Usual causes, by message:
+        403 / Forbidden       the edge refused the pod address: add k3s_cluster_cidr to onebox_lan_cidrs
+        no such host          pods cannot resolve {{ external_secrets_openbao_url | urlsplit('hostname') }}: k3s_coredns_hosts
+        x509 / certificate    set external_secrets_ca_file to the edge's CA
+        permission denied     OpenBao's kubernetes auth role {{ openbao_eso_role }} does not bind
+                              {{ external_secrets_namespace }}/{{ external_secrets_service_account }}, or the auth
+                              mount {{ openbao_k8s_auth_mount }} has no cluster configuration yet (converge openbao
+                              again now that k3s exists)
+        connection refused    OpenBao is down or sealed
+      Set external_secrets_wait_ready: false to deploy without waiting.
+  when:
+    - external_secrets_wait_ready | bool
+    - not ansible_check_mode
+    - _external_secrets_ready.stdout | default('') != 'True'

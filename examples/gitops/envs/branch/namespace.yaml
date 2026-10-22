@@ -1,0 +1,11 @@
+---
+# The name is a placeholder: the ApplicationSet that creates a branch environment sets the
+# kustomize namespace (source.kustomize.namespace: demo-mr<iid>), and kustomize's namespace
+# transformer renames this Namespace with it. The labels are what matters.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-branch
+  labels:
+    onebox/registry-pull: demo
+    onebox/environment-class: branch

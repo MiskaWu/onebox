@@ -1,0 +1,7 @@
+---
+# The dev environment of tenant demo: its Namespace and resource guard rails.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - limitrange.yaml

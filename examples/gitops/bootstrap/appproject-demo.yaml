@@ -1,0 +1,24 @@
+---
+# Reference copy — do not apply. roles/argocd renders this from one argocd_tenants entry:
+#
+#   argocd_tenants:
+#     - name: demo
+#       repo: https://gitlab.dev.example.com/demo/gitops.git
+#
+# The tenant boundary: this repository only, namespaces demo-* only, and no cluster-scoped kind
+# but Namespace (each environment declares its own Namespace, see envs/).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: demo
+  namespace: argocd
+spec:
+  description: Tenant boundary for demo
+  sourceRepos:
+    - https://gitlab.dev.example.com/demo/gitops.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: demo-*
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace

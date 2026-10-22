@@ -1,0 +1,60 @@
+---
+# Remove k3s from the host — an explicit operation, never part of converge (ADR 0009).
+# Run through playbooks/k3s-uninstall.yml. Without k3s_uninstall_confirm == onebox_env this
+# only prints what would be destroyed; with it, upstream's k3s-uninstall.sh (written by the
+# pinned installer of the running release) stops k3s, kills every container, unmounts and
+# deletes the data directory, the configuration and the binary links.
+#
+# Not removed: the admin group, the k3s-selinux package, firewalld trusted sources (listed
+# in the output with the commands to remove them).
+
+- name: Check for the uninstall script
+  ansible.builtin.stat:
+    path: "{{ k3s_bin | dirname }}/k3s-uninstall.sh"
+  register: _k3s_uninstaller
+
+- name: List what lives in the cluster
+  ansible.builtin.command: >-
+    {{ _k3s_kubectl }} get namespaces,helmcharts.helm.cattle.io -A --no-headers
+    -o custom-columns=KIND:.kind,NS:.metadata.namespace,NAME:.metadata.name
+  register: _k3s_inventory
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: _k3s_uninstaller.stat.exists
+
+- name: Preview
+  ansible.builtin.debug:
+    msg:
+      - >-
+        {{ 'k3s is installed' if _k3s_uninstaller.stat.exists
+           else 'k3s is not installed (no ' ~ k3s_bin | dirname ~ '/k3s-uninstall.sh)' }}
+      - >-
+        Would DELETE {{ k3s_data_dir }} (every workload, volume on local-path storage, Secret and Argo CD
+        state) and {{ k3s_config_dir }}.
+      - "Objects that disappear with it:"
+      - >-
+        {{ (_k3s_inventory.stdout_lines | default([]))
+           if (_k3s_inventory.rc | default(1)) == 0 else ['(cluster API not reachable)'] }}
+      - >-
+        Kept: group {{ k3s_admin_group }}, the k3s-selinux package, firewalld trusted sources
+        {{ k3s_cluster_cidr }} {{ k3s_service_cidr }}.
+      - "To proceed: run again with -e k3s_uninstall_confirm={{ onebox_env }}"
+  when: k3s_uninstall_confirm != onebox_env
+
+- name: Uninstall
+  when: k3s_uninstall_confirm == onebox_env
+  block:
+    - name: Run upstream's uninstall script
+      ansible.builtin.command: "{{ k3s_bin | dirname }}/k3s-uninstall.sh"
+      changed_when: true
+      when: _k3s_uninstaller.stat.exists
+
+    - name: Explain what is left
+      ansible.builtin.debug:
+        msg:
+          - "k3s is removed. Left on purpose (remove by hand if the host will not run k3s again):"
+          - "  groupdel {{ k3s_admin_group }}"
+          - "  firewall-cmd --permanent --zone=trusted --remove-source={{ k3s_cluster_cidr }} --remove-source={{ k3s_service_cidr }}"
+          - "  dnf remove k3s-selinux   (RHEL family)"
+          - "Remove the cluster components from onebox_components before the next converge, or it installs k3s again."

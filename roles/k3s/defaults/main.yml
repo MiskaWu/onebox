@@ -1,1 +1,125 @@
 ---
+# ── Version ──────────────────────────────────────────────────────────────────────────
+# A stable-channel release (https://update.k3s.io/v1-release/channels). Three pins move
+# together on an upgrade:
+#   k3s_version                the release tag
+#   k3s_binary_sha256          from the release's sha256sum-<arch>.txt
+#   k3s_install_script_sha256  install.sh at the same git tag
+# The binary is downloaded and checksum-verified by Ansible. The upstream install script is
+# pinned to the same tag and runs with INSTALL_K3S_SKIP_DOWNLOAD=true: it only writes the
+# systemd unit, the kubectl/crictl/ctr links and k3s-killall.sh / k3s-uninstall.sh, so the
+# uninstall path stays the one upstream maintains (it knows every mount and iptables chain
+# k3s creates). Upgrade one Kubernetes minor at a time; the role refuses to skip one.
+k3s_version: v1.36.5+k3s1
+k3s_binary_sha256:
+  amd64: d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313
+  arm64: 135e34cb9e8a1cfae3cb55577789e93501efe7edc080a8b2630458a85b07721e
+k3s_install_script_sha256: 46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad
+
+# CPU architecture of the host (k3s release naming). Derived from facts on a real host.
+k3s_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'] | default('x86_64'), 'unsupported') }}"
+
+# ── SELinux (RHEL family) ────────────────────────────────────────────────────────────
+# Run containerd with SELinux labelling (`selinux: true` in config.yaml) — on the RHEL family
+# when SELinux is enabled on the host (facts; render mode assumes it is). Needs the
+# k3s-selinux policy below, which the role installs.
+k3s_selinux: "{{ onebox_os_family == 'RedHat' and (ansible_facts['selinux']['status'] | default('enabled')) == 'enabled' }}"
+# The policy package is pinned here instead of letting install.sh add the rpm.rancher.io
+# repository: no third-party repository stays configured on the host and the package is the
+# one whose checksum is recorded. The stable channel ships an el9 build; upstream's
+# installer uses the same el9 package on EL 10.
+k3s_selinux_rpm_url: https://github.com/k3s-io/k3s-selinux/releases/download/v1.6.stable.1/k3s-selinux-1.6-1.el9.noarch.rpm
+k3s_selinux_rpm_sha256: 23d0095a766b89317d2bdbe8773825987db7221e48743417930a994ca1096793
+
+# ── Paths ────────────────────────────────────────────────────────────────────────────
+# The data directory is k3s' default on purpose: every cluster role writes its manifests to
+# <data dir>/server/manifests, and k3s-selinux labels exactly this path.
+k3s_bin: /usr/local/bin/k3s
+k3s_config_dir: /etc/rancher/k3s
+k3s_data_dir: /var/lib/rancher/k3s
+
+# ── Cluster access ───────────────────────────────────────────────────────────────────
+# k3s writes the admin kubeconfig (k3s_kubeconfig) as root:<group> 0640; members of this group
+# run kubectl as themselves, nobody else on the host can traverse /etc/rancher. Membership is
+# cluster-admin. Default members: the platform operators that are present (they have sudo
+# anyway — the group only saves them typing it). Accounts that do not exist are skipped, never
+# created.
+k3s_admin_group: k3s-admin
+k3s_admin_users: >-
+  {{ (operators_admins | default([]) | selectattr('state', 'undefined') | list
+      + operators_admins | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present') | list)
+     | map(attribute='name') | list }}
+
+# ── Network ──────────────────────────────────────────────────────────────────────────
+# k3s_cluster_cidr, k3s_service_cidr and k3s_service_node_port_range live in
+# group_vars/all/onebox.yml: firewalld, the edge's LAN gate and every cluster role read them.
+# Ranges the cluster must not overlap: podman's default network (10.88/16) and its first
+# subnet pool (10.89/16, where onebox_data_network lives) — one /15 — plus the data network
+# itself. The preflight refuses overlapping CIDRs.
+k3s_reserved_cidrs:
+  - 10.88.0.0/15
+  - "{{ onebox_data_subnet }}"
+# The NodePort range is narrowed (30000-30999, group_vars) because kube-proxy DNATs a NodePort
+# on every local address, 127.0.0.1 included: a Service that drew the cluster gateway's
+# loopback port would silently steal the edge's traffic. 31000-32767 stays free for
+# host-network listeners (k3s_gateway_http_port).
+# Pods reach platform services (OIDC issuer, OpenBao, Git) through the edge, and those vhosts
+# are LAN-only by default. Packets from a pod to the host keep the pod address as source, so
+# the edge only lets them in when k3s_cluster_cidr is listed in onebox_lan_cidrs. With this
+# true the preflight insists on it; set false if no pod should reach internal-only vhosts.
+k3s_pods_trusted_by_edge: true
+
+# Extra names/addresses in the API server certificate. The API is not opened in the firewall;
+# remote kubectl goes through an SSH tunnel (ssh -L 6443:127.0.0.1:6443 <host>).
+k3s_api_hostname: "k3s.{{ onebox_domain }}"
+k3s_tls_san:
+  - "{{ onebox_host_ip }}"
+  - "{{ k3s_api_hostname }}"
+
+# ── Packaged components ──────────────────────────────────────────────────────────────
+# traefik and servicelb are always disabled: the bundled Traefik would claim 80/443 through
+# servicelb, which binds host ports on every address — a second front door next to the edge.
+# The cluster gateway is the role k3s_gateway (our own Traefik, pinned, bound to loopback).
+# Adding an AddOn name here (e.g. onebox-argo-rollouts) makes k3s uninstall that AddOn and
+# delete its manifest — the supported way to remove a cluster component (see README).
+k3s_disable:
+  - traefik
+  - servicelb
+
+# Encrypt Secrets at rest in the datastore. Only cheap on a new cluster: on an existing one,
+# turning it on encrypts new writes only (`k3s secrets-encrypt reencrypt` does the rest).
+k3s_secrets_encryption: true
+
+# Anything else for config.yaml (keys of `k3s server --help`), merged over the values above,
+# e.g. {node-ip: 192.0.2.10, kubelet-arg: ["max-pods=150"]}.
+k3s_extra_config: {}
+
+# ── Container registries (registries.yaml) ───────────────────────────────────────────
+# Configure containerd for the platform's GitLab registry (gitlab_registry_hostname); on by
+# default when gitlab is a component of this host. containerd reaches it through the edge, so
+# with edge_tls_mode internal (or files with a private CA) it needs that CA: point
+# k3s_registry_ca_file at the PEM on the host.
+k3s_registry_enabled: "{{ 'gitlab' in onebox_components }}"
+k3s_registry_ca_file: "{{ onebox_edge_ca_file | default('') }}"
+# Node-wide pull credentials for the GitLab registry (a deploy token with read_registry).
+# Empty = anonymous; the alternative is per-namespace pull secrets (roles/external_secrets),
+# which keep one tenant from pulling another tenant's images. Node-wide credentials let every
+# pod on the node pull everything the token can read. Password: secrets.yml
+# k3s_registry_password.
+k3s_registry_username: ""
+# More registries: {host: {endpoint: [https://…], ca_file: /path, insecure_skip_verify: false}}
+k3s_registries_extra: {}
+
+# ── Cluster DNS ──────────────────────────────────────────────────────────────────────
+# Pods resolve names through CoreDNS, which forwards to the host's resolvers. When the
+# platform hostnames only resolve on the host (e.g. /etc/hosts in a lab), pin them here:
+#   k3s_coredns_hosts:
+#     "{{ openbao_hostname }}": "{{ onebox_host_ip }}"
+# Rendered as the coredns-custom ConfigMap that k3s' CoreDNS imports (*.server blocks).
+k3s_coredns_hosts: {}
+
+# ── Operations ───────────────────────────────────────────────────────────────────────
+# How long converge waits for the API server and the node after (re)starting k3s.
+k3s_ready_timeout: 300
+# playbooks/k3s-uninstall.yml only runs when this equals onebox_env (pass it with -e).
+k3s_uninstall_confirm: ""

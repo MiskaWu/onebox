@@ -1,0 +1,34 @@
+{# May contain a registry password: written with no_log, mode 0600. #}
+# Managed by onebox (roles/k3s) — edits are overwritten on the next converge.
+# containerd registry configuration; k3s reads it only when it starts.
+{% set _mirrors = _k3s_registries | dict2items | selectattr('value.endpoint', 'defined') | list %}
+{% if _mirrors | length > 0 %}
+mirrors:
+{% for r in _mirrors %}
+  "{{ r.key }}":
+    endpoint:
+{% for e in r.value.endpoint %}
+      - "{{ e }}"
+{% endfor %}
+{% endfor %}
+{% endif %}
+configs:
+{% for host, r in _k3s_registries | dictsort %}
+  "{{ host }}":
+{% if r.ca_file | default('') | length > 0 or r.insecure_skip_verify | default(false) %}
+    tls:
+{% if r.ca_file | default('') | length > 0 %}
+      # The edge's CA (edge_tls_mode internal, or files with a private CA).
+      ca_file: "{{ r.ca_file }}"
+{% endif %}
+{% if r.insecure_skip_verify | default(false) %}
+      insecure_skip_verify: true
+{% endif %}
+{% endif %}
+{% if k3s_registry_enabled | bool and host == gitlab_registry_hostname and k3s_registry_username | length > 0 %}
+    # Node-wide pull credentials: every pod on this node can pull what this token can read.
+    auth:
+      username: {{ k3s_registry_username | to_json }}
+      password: {{ lookup('ansible.builtin.vars', 'k3s_registry_password', default='') | to_json }}
+{% endif %}
+{% endfor %}

@@ -1,0 +1,18 @@
+---
+# In-cluster address for both listeners; backends of the route and the TCP router. ClusterIP:
+# NodePorts bypass the edge and cannot be filtered by the host firewall.
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-mqtt
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: demo-mqtt
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+    - name: mqtt-ws
+      port: 8083
+      targetPort: mqtt-ws

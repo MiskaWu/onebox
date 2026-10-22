@@ -1,0 +1,18 @@
+---
+# Internal values. The paths are k3s's (roles/k3s keeps its data directory at the default).
+_k3s_gateway_manifests_dir: /var/lib/rancher/k3s/server/manifests
+# k3s serves this directory at https://<api>/static/; the helm job substitutes %{KUBERNETES_API}%
+# and trusts the cluster CA — the same mechanism k3s uses for its own packaged charts.
+_k3s_gateway_static_dir: /var/lib/rancher/k3s/server/static/charts
+_k3s_gateway_chart_file: "onebox-traefik-{{ k3s_gateway_chart_version }}.tgz"
+_k3s_gateway_kubectl: "/usr/local/bin/k3s kubectl --kubeconfig {{ k3s_kubeconfig }}"
+_k3s_gateway_gatewayapi_url: >-
+  https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ k3s_gateway_gatewayapi_version }}/standard-install.yaml
+
+# Entrypoint names the chart already uses; a TCP entrypoint with one of them would overwrite it.
+_k3s_gateway_reserved_names: [traefik, web, websecure, metrics]
+_k3s_gateway_internal_ports:
+  - "{{ k3s_gateway_http_port | int }}"
+  - "{{ k3s_gateway_ping_port | int }}"
+  - "{{ k3s_gateway_metrics_port | int }}"
+  - "{{ k3s_gateway_websecure_port | int }}"

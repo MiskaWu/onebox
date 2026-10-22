@@ -1,3 +1,130 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Checks that need no running cluster. Runs from roles/preflight before anything changes.
+
+- name: Assert the version pins are consistent
+  ansible.builtin.assert:
+    that:
+      - k3s_version is match('^v1\.[0-9]+\.[0-9]+\+k3s[0-9]+$')
+      - k3s_binary_sha256 is mapping
+      - k3s_install_script_sha256 | length == 64
+    fail_msg: "k3s_version must look like v1.36.5+k3s1, with k3s_binary_sha256 (per arch) and k3s_install_script_sha256"
+    quiet: true
+
+- name: Assert the CPU architecture has a pinned binary
+  ansible.builtin.assert:
+    that:
+      - k3s_arch in k3s_binary_sha256
+    fail_msg: >-
+      no pinned k3s binary for architecture '{{ k3s_arch }}' (pinned: {{ k3s_binary_sha256.keys() | join(', ') }});
+      add its sha256 from the release's sha256sum-<arch>.txt to k3s_binary_sha256
+    quiet: true
+  when: not onebox_render_only | bool
+
+# The bundled Traefik claims 80/443 through servicelb, and servicelb binds host ports on every
+# address: either one would put a second front door next to the edge (ADR 0014).
+- name: Assert the bundled ingress and load balancer stay disabled
+  ansible.builtin.assert:
+    that:
+      - "'traefik' in k3s_disable"
+      - "'servicelb' in k3s_disable"
+    fail_msg: >-
+      k3s_disable must contain traefik and servicelb. The cluster gateway is roles/k3s_gateway (our
+      own Traefik on loopback); the bundled one would compete for 80/443 with the edge.
+    quiet: true
+
+# Integer ranges of every CIDR, so overlaps can be checked without the ipaddr filters
+# (they live in a collection). JSON in, JSON out: works on every ansible-core version.
+- name: Compute the address ranges of the cluster and reserved networks
+  ansible.builtin.set_fact:
+    _k3s_ranges: >-
+      {%- set out = [] -%}
+      {%- for cidr in [k3s_cluster_cidr, k3s_service_cidr] + k3s_reserved_cidrs -%}
+      {%- set parts = (cidr ~ '/32').split('/') -%}
+      {%- set o = parts[0].split('.') | map('int') | list -%}
+      {%- set n = ((o[0] * 256 + o[1]) * 256 + o[2]) * 256 + o[3] -%}
+      {%- set size = 2 ** (32 - (parts[1] | int)) -%}
+      {%- set start = n - (n % size) -%}
+      {%- set _ = out.append({'cidr': cidr, 'start': start, 'end': start + size - 1}) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Assert the pod and service networks overlap nothing
+  ansible.builtin.assert:
+    that:
+      - _k3s_overlap_list | length == 0
+    fail_msg: >-
+      overlapping networks: {{ _k3s_overlap_list | join('; ') }}. Pick k3s_cluster_cidr /
+      k3s_service_cidr outside podman's ranges (k3s_reserved_cidrs) — overlapping routes break
+      pod ↔ container traffic in ways that look like random timeouts. They cannot be changed after
+      the cluster exists.
+    quiet: true
+  vars:
+    # Older ansible-core turns a list-looking template result into a list, newer keeps the
+    # string: accept both.
+    _r: "{{ _k3s_ranges if _k3s_ranges is not string else _k3s_ranges | from_json }}"
+    _k3s_overlap_list: "{{ _k3s_overlaps if _k3s_overlaps is not string else _k3s_overlaps | from_json }}"
+    # The first two ranges are the cluster's own; each is compared with every range after it.
+    _k3s_overlaps: >-
+      {%- set out = [] -%}
+      {%- for a in _r[:2] -%}
+      {%- for b in _r[loop.index:] -%}
+      {%- if a.start <= b.end and b.start <= a.end -%}
+      {%- set _ = out.append(a.cidr ~ ' overlaps ' ~ b.cidr) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+# Pods reach the OIDC issuer, OpenBao and Git through the edge, which keeps the pod address as
+# the client address; internal-only vhosts answer 403 unless the pod network counts as LAN
+# (ADR 0006, ADR 0017). The symptom without it is far from the cause: "token exchange failed",
+# "permission denied" from External Secrets, a repository Argo CD cannot fetch.
+- name: Assert the edge trusts the pod network
+  ansible.builtin.assert:
+    that:
+      - k3s_cluster_cidr in onebox_lan_cidrs
+    fail_msg: >-
+      add k3s_cluster_cidr ({{ k3s_cluster_cidr }}) to onebox_lan_cidrs: in-cluster clients of
+      internal-only vhosts (External Secrets → OpenBao, Argo CD → OIDC issuer and Git) are refused
+      with 403 otherwise. If no pod may reach internal-only vhosts, set k3s_pods_trusted_by_edge: false.
+    quiet: true
+  when:
+    - k3s_pods_trusted_by_edge | bool
+    - "'edge' in onebox_components"
+    - edge_internal_only_default | bool
+
+# kube-proxy DNATs NodePorts on every local address, 127.0.0.1 included: a NodePort equal to
+# the gateway's loopback port would silently take over the edge's traffic.
+- name: Assert the gateway port is outside the NodePort range
+  ansible.builtin.assert:
+    that:
+      - (k3s_gateway_http_port | int) < (k3s_service_node_port_range.split('-')[0] | int)
+        or (k3s_gateway_http_port | int) > (k3s_service_node_port_range.split('-')[1] | int)
+    fail_msg: >-
+      k3s_gateway_http_port ({{ k3s_gateway_http_port }}) is inside k3s_service_node_port_range
+      ({{ k3s_service_node_port_range }}); a Service with that NodePort would capture the edge's traffic
+    quiet: true
+
+# containerd pulls through the edge; with Caddy's internal CA it fails with x509 errors
+# (ImagePullBackOff) unless registries.yaml names the CA.
+- name: Assert the registry CA is configured when the edge uses a private CA
+  ansible.builtin.assert:
+    that:
+      - k3s_registry_ca_file | length > 0
+    fail_msg: >-
+      edge_tls_mode is internal: set k3s_registry_ca_file (or onebox_edge_ca_file) to the edge's root
+      CA on the host, or containerd cannot pull from {{ gitlab_registry_hostname }}
+    quiet: true
+  when:
+    - k3s_registry_enabled | bool
+    - (edge_tls_mode | default('acme_dns')) == 'internal'
+
+- name: Assert node-wide registry credentials are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', 'k3s_registry_password', default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: "secrets.yml: set k3s_registry_password (make secrets-set KEY=k3s_registry_password), or clear k3s_registry_username"
+    quiet: true
+  when:
+    - k3s_registry_enabled | bool
+    - k3s_registry_username | length > 0

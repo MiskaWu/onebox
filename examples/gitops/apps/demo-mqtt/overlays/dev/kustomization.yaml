@@ -1,0 +1,10 @@
+---
+# demo-mqtt in dev.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: demo-dev
+resources:
+  - ../../base
+images:
+  - name: docker.io/library/eclipse-mosquitto
+    newTag: 2.1.2-alpine

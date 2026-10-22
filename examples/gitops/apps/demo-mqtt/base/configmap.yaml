@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-mqtt
+data:
+  mosquitto.conf: |
+    # 1883: plain MQTT (in-cluster clients and the raw TCP entrypoint)
+    listener 1883
+    protocol mqtt
+    # 8083: MQTT over WebSocket (behind the HTTPRoute)
+    listener 8083
+    protocol websockets
+    # Demo only. Anything real needs a password_file (mounted from an ExternalSecret) or
+    # client certificates: the raw TCP path is plaintext on the LAN, and the network is not an
+    # authentication mechanism.
+    allow_anonymous true
+    persistence false

@@ -1,0 +1,13 @@
+---
+# Internal values. The paths are k3s's (roles/k3s keeps its data directory at the default).
+_argo_rollouts_manifests_dir: /var/lib/rancher/k3s/server/manifests
+_argo_rollouts_static_dir: /var/lib/rancher/k3s/server/static/charts
+_argo_rollouts_chart_file: "onebox-argo-rollouts-{{ argo_rollouts_chart_version }}.tgz"
+_argo_rollouts_kubectl: "/usr/local/bin/k3s kubectl --kubeconfig {{ k3s_kubeconfig }}"
+
+# The plugin's name is part of the protocol: Rollout objects reference exactly this string in
+# spec.strategy.canary.trafficRouting.plugins. Case matters.
+_argo_rollouts_plugin_name: argoproj-labs/gatewayAPI
+_argo_rollouts_plugin_url: >-
+  {{ 'https://github.com/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi/releases/download/'
+     ~ argo_rollouts_gatewayapi_plugin_version ~ '/gatewayapi-plugin-linux-' ~ argo_rollouts_arch }}

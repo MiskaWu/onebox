@@ -1,0 +1,17 @@
+---
+# Defaults for containers that declare no resources (a quota on limits.* rejects pods without
+# limits, so the defaults are what lets such pods in at all). The host also runs services the cluster
+# cannot see; a container without limits can starve them.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi

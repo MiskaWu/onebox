@@ -1,0 +1,11 @@
+---
+# Declared here, not created by Argo CD (CreateNamespace=false everywhere): only an explicit
+# Namespace carries the labels the platform acts on.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-dev
+  labels:
+    # External Secrets puts the image pull Secret `registry-pull` into every namespace with this
+    # label (value = tenant). Workloads still list it in imagePullSecrets themselves.
+    onebox/registry-pull: demo

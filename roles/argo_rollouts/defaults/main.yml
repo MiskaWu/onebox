@@ -1,1 +1,35 @@
 ---
+# ── Chart (https://argoproj.github.io/argo-helm) ─────────────────────────────────────
+# Downloaded with the digest from the repository index and served by k3s itself (see
+# roles/k3s_gateway/README.md). Chart, sha256 and app version move together.
+argo_rollouts_chart_version: "2.43.8"
+argo_rollouts_app_version: v1.10.1   # informational: the chart's appVersion
+argo_rollouts_chart_url: >-
+  {{ 'https://github.com/argoproj/argo-helm/releases/download/argo-rollouts-' ~ argo_rollouts_chart_version
+     ~ '/argo-rollouts-' ~ argo_rollouts_chart_version ~ '.tgz' }}
+argo_rollouts_chart_sha256: 1c998ee3cd72a078ca73ba399644198fe8a446399b5fc5bbff94af5043a0747d
+
+argo_rollouts_namespace: argo-rollouts
+
+# ── Gateway API traffic-router plugin (canary weights on HTTPRoutes) ─────────────────
+# Blue/green needs no plugin: it switches Service selectors and works with any router. Only
+# weighted canaries go through this plugin, which is still pre-1.0 — if it misbehaves, blue/green
+# and plain Deployments are unaffected (ADR 0015).
+# The controller downloads the binary when it starts and refuses it when the checksum differs
+# (GitHub publishes the digests on the release). It needs github.com at every controller start.
+argo_rollouts_gatewayapi_plugin_enabled: true
+argo_rollouts_gatewayapi_plugin_version: v0.17.0
+argo_rollouts_gatewayapi_plugin_sha256:
+  amd64: 1904ca787d33107c140521899d61fff030ee75d99908bd175fca5a4647759061
+  arm64: 5221279f7bf2c9b2c0ff6ed7ff12718ecce1d4892f1ff5e5224bb723cfd0fd92
+# Architecture of the node the controller runs on (release naming). Derived from facts.
+argo_rollouts_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'] | default('x86_64'), 'unsupported') }}"
+
+# ── Pods ─────────────────────────────────────────────────────────────────────────────
+# One node: a second replica would only run leader election.
+argo_rollouts_replicas: 1
+argo_rollouts_resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 500m, memory: 256Mi}
+# How long converge waits for the controller to become available (it downloads the plugin).
+argo_rollouts_ready_timeout: 300

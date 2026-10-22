@@ -1,0 +1,146 @@
+{# Contains secrets (OIDC client, repository tokens): written with no_log, mode 0600. #}
+# Managed by onebox (roles/argocd) — k3s applies this file from its manifests directory.
+#
+# Argo CD (ADR 0016). Credentials are not in the HelmChart object (anyone allowed to read
+# HelmCharts would see them) but in the Secret below, which the HelmChart references through
+# valuesSecrets; Secrets are encrypted at rest (k3s secrets-encryption). This file is 0600.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ _argocd_values_secret }}
+  namespace: kube-system
+type: Opaque
+stringData:
+  # Never leave a key empty in here: a YAML null in a values file *deletes* the chart's default
+  # for that key when Helm merges the files (an empty `cm:` would wipe all of argocd-cm).
+  values.yaml: |
+{% if not (argocd_oidc_enabled | bool) and argocd_repo_credentials | length == 0 %}
+    {}
+{% else %}
+    configs:
+{% if argocd_oidc_enabled | bool %}
+      cm:
+        # Argo CD is a client of the platform's issuer. The client secret is referenced from
+        # argocd-secret ($key), never written into the ConfigMap.
+        oidc.config: |
+          name: {{ argocd_oidc_name | to_json }}
+          issuer: {{ argocd_oidc_issuer | to_json }}
+          clientID: {{ lookup('ansible.builtin.vars', 'argocd_oidc_client_id') | to_json }}
+          clientSecret: $oidc.onebox.clientSecret
+          requestedScopes: {{ argocd_oidc_scopes | to_json }}
+{% if _argocd_ca_pem | length > 0 %}
+          rootCA: {{ _argocd_ca_pem | to_json }}
+{% endif %}
+      secret:
+        extra:
+          oidc.onebox.clientSecret: {{ lookup('ansible.builtin.vars', 'argocd_oidc_client_secret') | to_json }}
+{% endif %}
+{% if argocd_repo_credentials | length > 0 %}
+      # Credential templates: URL prefix match, read-only deploy tokens.
+      credentialTemplates:
+{% for cred in argocd_repo_credentials %}
+        {{ cred.name }}:
+          url: {{ cred.url | to_json }}
+          username: {{ cred.username | to_json }}
+          password: {{ lookup('ansible.builtin.vars', cred.password_var) | to_json }}
+{% endfor %}
+{% endif %}
+{% endif %}
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: argocd
+  namespace: kube-system
+spec:
+  # argo-cd chart {{ argocd_chart_version }} (Argo CD {{ argocd_app_version }}), downloaded with the sha256 from the
+  # chart repository index and served by k3s.
+  chart: https://%{KUBERNETES_API}%/static/charts/{{ _argocd_chart_file }}
+  targetNamespace: {{ argocd_namespace }}
+  createNamespace: true
+  # Never uninstall-and-reinstall on a failed upgrade: the old release keeps running.
+  failurePolicy: abort
+  valuesSecrets:
+    - name: {{ _argocd_values_secret }}
+      keys: [values.yaml]
+  valuesContent: |-
+    global:
+      domain: {{ argocd_hostname }}
+
+    # The platform's issuer is the only identity broker; Dex would be a second one in series.
+    dex:
+      enabled: false
+    notifications:
+      enabled: {{ argocd_notifications_enabled | bool | to_json }}
+    # Argo CD's own Redis is a cache it rebuilds by itself — not shared data.
+
+    configs:
+      params:
+        # TLS ends at the edge; the gateway talks plain HTTP to the server. Without this the
+        # server redirects to HTTPS and loops behind the edge.
+        server.insecure: true
+      cm:
+        url: https://{{ argocd_hostname }}
+        admin.enabled: {{ argocd_local_admin_enabled | bool | to_json }}
+        # Explicit, because the EndpointSlice exception below is only safe with annotation
+        # tracking: with label tracking, slices generated for every tracked Service inherit the
+        # tracking label and are pruned and recreated in a loop across the cluster.
+        application.resourceTrackingMethod: annotation
+        # Replaces the chart's list wholesale — see _argocd_resource_exclusions (vars/main.yml)
+        # and the tripwire argocd_exclusions_reviewed_for.
+        resource.exclusions: |
+          {{ (_argocd_resource_exclusions + argocd_resource_exclusions_extra) | to_nice_yaml(indent=2) | indent(10) }}
+      rbac:
+        # Subjects may be OIDC groups or e-mail addresses.
+        scopes: "[groups, email]"
+        policy.matchMode: glob
+        policy.default: {{ argocd_rbac_default_role | to_json }}
+        policy.csv: |
+{% for tenant in argocd_tenants %}
+          # {{ tenant.name }}: read-only plus sync of its own applications
+          g, role:{{ tenant.name }}-syncer, role:readonly
+          p, role:{{ tenant.name }}-syncer, applications, sync, {{ tenant.name }}/*, allow
+{% endfor %}
+{% for subject in argocd_rbac_admins %}
+          g, {{ subject }}, role:admin
+{% endfor %}
+{% for subject in argocd_rbac_readers %}
+          g, {{ subject }}, role:readonly
+{% endfor %}
+{% for grant in argocd_rbac_syncers %}
+          g, {{ grant.subject }}, role:{{ grant.tenant }}-syncer
+{% endfor %}
+          # (end of policy)
+{% if _argocd_ca_pem | length > 0 and _argocd_git_hosts | length > 0 %}
+      # HTTPS Git servers behind the edge's private CA.
+      tls:
+        certificates:
+{% for host in _argocd_git_hosts %}
+          {{ host }}: {{ _argocd_ca_pem | to_json }}
+{% endfor %}
+{% endif %}
+
+    server:
+      ingress:
+        enabled: true
+        ingressClassName: {{ argocd_ingress_class }}
+        hostname: {{ argocd_hostname }}
+        path: /
+        pathType: Prefix
+        # Certificates are the edge's business.
+        tls: false
+      resources:
+        {{ argocd_resources.server | to_nice_yaml(indent=2) | indent(8) }}
+    controller:
+      resources:
+        {{ argocd_resources.controller | to_nice_yaml(indent=2) | indent(8) }}
+    repoServer:
+      resources:
+        {{ argocd_resources.repoServer | to_nice_yaml(indent=2) | indent(8) }}
+    applicationSet:
+      resources:
+        {{ argocd_resources.applicationSet | to_nice_yaml(indent=2) | indent(8) }}
+    redis:
+      resources:
+        {{ argocd_resources.redis | to_nice_yaml(indent=2) | indent(8) }}

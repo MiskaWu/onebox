@@ -1,4 +1,280 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
-  ansible.builtin.include_tasks: render.yml
+# k3s, one server node (ADR 0014). The order is deliberate:
+#   1. host prerequisites  cgroup v2, version guard, admin group, firewalld trusted sources
+#   2. configuration       config.yaml / registries.yaml — read by k3s when it starts, and the
+#                          CIDRs in it can never change once the cluster exists
+#   3. software            SELinux policy, pinned binary, systemd unit (installer runs only on
+#                          install or upgrade, then it is deleted)
+#   4. start and verify    API ready, node Ready, kubeconfig group-readable
+#   5. manifests           files k3s applies from its auto-deploy directory
+
+# ── 1. Prerequisites ─────────────────────────────────────────────────────────────────
+- name: Read the cgroup filesystem type
+  ansible.builtin.command: stat -fc %T /sys/fs/cgroup
+  register: _k3s_cgroup
+  changed_when: false
+  check_mode: false
+
+- name: Assert the unified cgroup hierarchy (cgroup v2)
+  ansible.builtin.assert:
+    that:
+      - _k3s_cgroup.stdout | trim == 'cgroup2fs'
+    fail_msg: "k3s needs cgroup v2; /sys/fs/cgroup is {{ _k3s_cgroup.stdout | trim }} on this host"
+    quiet: true
+
+- name: Remember whether k3s was running before this run
+  ansible.builtin.command: systemctl is-active k3s
+  register: _k3s_active_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read the installed k3s version
+  ansible.builtin.command: "{{ k3s_bin }} --version"
+  register: _k3s_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Remember the installed version
+  ansible.builtin.set_fact:
+    _k3s_installed_version: >-
+      {{ (_k3s_installed.stdout | default('') | regex_search('v1\.[0-9]+\.[0-9]+\+k3s[0-9]+')) | default('', true)
+         if _k3s_installed.rc | default(1) == 0 else '' }}
+
+# The Kubernetes control plane supports upgrades of one minor version at a time, and no
+# downgrades of the minor: the datastore schema only moves forward.
+- name: Assert the version change is one Kubernetes minor at most
+  ansible.builtin.assert:
+    that:
+      - (_k3s_minor_step | int) in [0, 1]
+    fail_msg: >-
+      installed {{ _k3s_installed_version }}, k3s_version is {{ k3s_version }}: upgrade one minor at a
+      time (pin each intermediate release in turn, converge, check the cluster) and never downgrade a minor
+    quiet: true
+  vars:
+    _k3s_minor_step: "{{ (k3s_version.split('.')[1] | int) - (_k3s_installed_version.split('.')[1] | int) }}"
+  when: _k3s_installed_version | length > 0
+
+- name: Cluster admin group (members can use kubectl as themselves)
+  ansible.builtin.group:
+    name: "{{ k3s_admin_group }}"
+    system: true
+
+# Accounts are managed elsewhere (roles/operators); unknown names are skipped, not created.
+- name: Look up the admin accounts
+  ansible.builtin.command: getent passwd {{ item }}
+  loop: "{{ k3s_admin_users }}"
+  register: _k3s_admin_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Add existing admin accounts to the group
+  ansible.builtin.user:
+    name: "{{ item.item }}"
+    groups: "{{ k3s_admin_group }}"
+    append: true
+  loop: "{{ _k3s_admin_lookup.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: _k3s_admin_added
+  when: item.rc == 0
+
+# The standard k3s + firewalld coexistence setting: without it firewalld's FORWARD handling
+# drops pod → CoreDNS and pod → API server traffic (pods stuck in ContainerCreating, DNS
+# timeouts). It exposes nothing to the LAN. Applied to the runtime and the permanent
+# configuration, so no firewalld reload (which drops netavark's container rules) is needed.
+- name: Check whether firewalld is running
+  ansible.builtin.command: systemctl is-active firewalld
+  register: _k3s_firewalld
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Trust the pod and service networks in firewalld
+  ansible.builtin.command: firewall-cmd {{ item.0 }} --zone=trusted --add-source={{ item.1 }}
+  loop: "{{ ['--permanent', ''] | product([k3s_cluster_cidr, k3s_service_cidr]) | list }}"
+  loop_control:
+    label: "{{ item.1 }}{{ ' (permanent)' if item.0 | length > 0 else ' (runtime)' }}"
+  register: _k3s_fw_trusted
+  changed_when: "'ALREADY_ENABLED' not in (_k3s_fw_trusted.stdout ~ _k3s_fw_trusted.stderr)"
+  when: _k3s_firewalld.stdout | trim == 'active'
+
+# ── 2. Configuration ─────────────────────────────────────────────────────────────────
+- name: Write the k3s configuration
+  ansible.builtin.include_tasks: render_config.yml
+
+# ── 3. Software ──────────────────────────────────────────────────────────────────────
+- name: SELinux policy for k3s
+  when:
+    - k3s_selinux | bool
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+  block:
+    - name: Read the installed policy package
+      ansible.builtin.command: rpm -q k3s-selinux
+      register: _k3s_selinux_pkg
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # Checksum-pinned package instead of a GPG check against a key fetched at install time.
+    - name: Install the pinned policy package
+      when: _k3s_selinux_pkg.stdout | trim != (k3s_selinux_rpm_url | basename | regex_replace('\.rpm$', ''))
+      block:
+        - name: Staging directory
+          ansible.builtin.file:
+            path: "{{ _k3s_staging_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Download the policy package
+          ansible.builtin.get_url:
+            url: "{{ k3s_selinux_rpm_url }}"
+            dest: "{{ _k3s_staging_dir }}/{{ k3s_selinux_rpm_url | basename }}"
+            checksum: "sha256:{{ k3s_selinux_rpm_sha256 }}"
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Install the policy package (container-selinux comes from the distribution)
+          ansible.builtin.dnf:
+            name: "{{ _k3s_staging_dir }}/{{ k3s_selinux_rpm_url | basename }}"
+            state: present
+            disable_gpg_check: true
+      always:
+        - name: Remove the staged package
+          ansible.builtin.file:
+            path: "{{ _k3s_staging_dir }}/{{ k3s_selinux_rpm_url | basename }}"
+            state: absent
+
+- name: The k3s binary (pinned, checksum verified)
+  ansible.builtin.get_url:
+    url: "{{ _k3s_release_url }}/{{ _k3s_binary_name }}"
+    dest: "{{ k3s_bin }}"
+    checksum: "sha256:{{ k3s_binary_sha256[k3s_arch] }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart k3s
+
+# k3s-selinux labels /usr/local/bin/k3s container_runtime_exec_t; without the label k3s runs
+# its containers unconfined or fails to start them.
+- name: Restore the SELinux label of the binary
+  ansible.builtin.command: restorecon -v {{ k3s_bin }}
+  register: _k3s_restorecon
+  changed_when: "'Relabeled' in _k3s_restorecon.stdout"
+  when: ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+
+- name: Check for the k3s systemd unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/k3s.service
+  register: _k3s_unit
+
+# The upstream installer writes the unit, the kubectl/crictl/ctr links and the killall and
+# uninstall scripts. It never downloads here (INSTALL_K3S_SKIP_DOWNLOAD covers the binary and
+# the SELinux RPM), never starts k3s, and is deleted afterwards. It runs on a first install and
+# whenever k3s_version changes, so the uninstall script always matches the running release.
+- name: Install the systemd unit and helper scripts (pinned upstream installer)
+  when: not _k3s_unit.stat.exists or _k3s_installed_version != k3s_version
+  block:
+    - name: Staging directory
+      ansible.builtin.file:
+        path: "{{ _k3s_staging_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Download the installer
+      ansible.builtin.get_url:
+        url: "{{ _k3s_install_script_url }}"
+        dest: "{{ _k3s_staging_dir }}/install.sh"
+        checksum: "sha256:{{ k3s_install_script_sha256 }}"
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Run the installer
+      ansible.builtin.command: "{{ _k3s_staging_dir }}/install.sh"
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+        INSTALL_K3S_SKIP_DOWNLOAD: "true"
+        INSTALL_K3S_SKIP_SELINUX_RPM: "true"
+        INSTALL_K3S_SKIP_ENABLE: "true"
+        INSTALL_K3S_SKIP_START: "true"
+        # Pinned: the installer otherwise falls back to /opt/bin when this is not writable.
+        INSTALL_K3S_BIN_DIR: "{{ k3s_bin | dirname }}"
+        INSTALL_K3S_EXEC: server
+      changed_when: true
+      when: not ansible_check_mode
+  always:
+    - name: Remove the installer
+      ansible.builtin.file:
+        path: "{{ _k3s_staging_dir }}/install.sh"
+        state: absent
+
+# ── 4. Start and verify ──────────────────────────────────────────────────────────────
+- name: Run k3s
+  ansible.builtin.systemd_service:
+    name: k3s
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Apply configuration and binary changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the API server
+  ansible.builtin.command: "{{ _k3s_kubectl }} get --raw /readyz"
+  register: _k3s_readyz
+  until: _k3s_readyz.rc == 0
+  retries: "{{ (k3s_ready_timeout | int / 5) | int }}"
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Wait for the node to be Ready
+  ansible.builtin.command: "{{ _k3s_kubectl }} wait --for=condition=Ready node --all --timeout={{ k3s_ready_timeout }}s"
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+# k3s writes the kubeconfig itself (write-kubeconfig-group/-mode); check that it really did,
+# instead of trusting the configuration (ADR 0022).
+- name: Read the kubeconfig ownership
+  ansible.builtin.stat:
+    path: "{{ k3s_kubeconfig }}"
+  register: _k3s_kubeconfig_stat
+
+- name: Assert the kubeconfig is readable by the admin group only
+  ansible.builtin.assert:
+    that:
+      - _k3s_kubeconfig_stat.stat.exists
+      - _k3s_kubeconfig_stat.stat.gr_name == k3s_admin_group
+      - _k3s_kubeconfig_stat.stat.mode == '0640'
+    fail_msg: >-
+      {{ k3s_kubeconfig }} should be root:{{ k3s_admin_group }} 0640 (found
+      {{ _k3s_kubeconfig_stat.stat.gr_name | default('?') }} {{ _k3s_kubeconfig_stat.stat.mode | default('?') }});
+      look at journalctl -u k3s for write-kubeconfig errors
+    quiet: true
+  when: not ansible_check_mode
+
+# ── 5. Manifests ─────────────────────────────────────────────────────────────────────
+- name: Write the cluster manifests
+  ansible.builtin.include_tasks: render_manifests.yml
+
+- name: Explain that new group members must log in again
+  ansible.builtin.debug:
+    msg:
+      - "Added to {{ k3s_admin_group }}: {{ _added | join(', ') }}"
+      - "Group membership is read at login: they run `newgrp {{ k3s_admin_group }}` or log in again before using kubectl."
+  vars:
+    _added: >-
+      {{ _k3s_admin_added.results | default([]) | selectattr('changed', 'defined') | selectattr('changed')
+         | map(attribute='item.item') | list }}
+  when: _added | length > 0

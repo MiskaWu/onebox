@@ -1,3 +1,106 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Checks that need no running cluster. Runs from roles/preflight before anything changes.
+
+# Tripwire (ADR 0023): our resource.exclusions replaces the chart's list. Compare before
+# deploying a new chart version — the failure mode of a stale copy is a kind silently ignored
+# by Argo CD while applications show Synced.
+- name: Assert the exclusion list was reviewed for this chart version
+  ansible.builtin.assert:
+    that:
+      - argocd_exclusions_reviewed_for == argocd_chart_version
+    fail_msg: >-
+      argo-cd chart {{ argocd_chart_version }}, but the exclusion list was last compared with
+      {{ argocd_exclusions_reviewed_for }}. Compare configs.cm."resource.exclusions" in the new chart's
+      values.yaml with _argocd_resource_exclusions (roles/argocd/vars/main.yml), carry over upstream
+      changes keeping EndpointSlice allowed, then set argocd_exclusions_reviewed_for: {{ argocd_chart_version }}.
+    quiet: true
+
+- name: Assert the tenants are well-formed
+  ansible.builtin.assert:
+    that:
+      - argocd_tenants | selectattr('name', 'undefined') | list | length == 0
+      - argocd_tenants | selectattr('repo', 'undefined') | list | length == 0
+      - _names | reject('match', '^[a-z][a-z0-9]{1,11}$') | list | length == 0
+      - _names | unique | length == _names | length
+      - "'platform-roots' not in _names and 'default' not in _names"
+    fail_msg: >-
+      argocd_tenants: every entry needs name and repo; names are 2-12 lowercase letters/digits (no
+      dashes: namespaces are <tenant>-<env>), unique, and not 'default' or 'platform-roots'
+    quiet: true
+  vars:
+    _names: "{{ argocd_tenants | map(attribute='name') | list }}"
+
+# A grant for a tenant that does not exist references a role nobody defines: "can sign in but
+# Sync is greyed out", without any error.
+- name: Assert RBAC entries reference existing tenants
+  ansible.builtin.assert:
+    that:
+      - argocd_rbac_syncers | selectattr('subject', 'undefined') | list | length == 0
+      - argocd_rbac_syncers | selectattr('tenant', 'undefined') | list | length == 0
+      - argocd_rbac_syncers | map(attribute='tenant') | difference(argocd_tenants | map(attribute='name')) | length == 0
+      - _subjects | select('search', '[,\\s]') | list | length == 0
+      - argocd_rbac_default_role in ['', 'role:readonly', 'role:admin']
+    fail_msg: >-
+      argocd_rbac_syncers entries need {subject, tenant} with a tenant from argocd_tenants; subjects
+      (groups or e-mails) cannot contain commas or spaces; argocd_rbac_default_role is "", role:readonly
+      or role:admin
+    quiet: true
+  vars:
+    _subjects: >-
+      {{ argocd_rbac_admins + argocd_rbac_readers + argocd_rbac_syncers | map(attribute='subject') | list }}
+
+# Disabling the local admin before an SSO administrator exists locks everybody out of the UI
+# (ADR 0009). The transition is: admins listed → signed in via SSO and synced → disable.
+- name: Assert someone can still administer Argo CD
+  ansible.builtin.assert:
+    that:
+      - argocd_local_admin_enabled | bool or (argocd_oidc_enabled | bool and argocd_rbac_admins | length > 0)
+    fail_msg: >-
+      argocd_local_admin_enabled is false but no SSO administrator is declared (argocd_rbac_admins) or
+      SSO is off: nobody could change Argo CD. Declare an admin, sign in through SSO and sync something,
+      then disable the local admin.
+    quiet: true
+
+# With Caddy's internal CA, Argo CD cannot verify the issuer (and HTTPS Git behind the edge)
+# without it: "x509: certificate signed by unknown authority" at sign-in.
+- name: Assert a CA is configured when the edge uses a private CA
+  ansible.builtin.assert:
+    that:
+      - argocd_ca_file | length > 0
+    fail_msg: >-
+      edge_tls_mode is internal: set argocd_ca_file (or onebox_edge_ca_file) to the edge's root CA on
+      the host, e.g. <edge data dir>/.local/share/caddy/pki/authorities/local/root.crt
+    quiet: true
+  when: (edge_tls_mode | default('acme_dns')) == 'internal'
+
+- name: Assert the OIDC client is declared
+  ansible.builtin.assert:
+    that:
+      - "'argocd' in onebox_oidc_clients"
+    fail_msg: "onebox_oidc_clients.argocd is missing (redirect https://{{ argocd_hostname }}/auth/callback)"
+    quiet: true
+  when: argocd_oidc_enabled | bool
+
+# Names only — the values are secrets (ADR 0021).
+- name: Assert the Argo CD secrets are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: "secrets.yml: set {{ item }} (make secrets-set KEY={{ item }})"
+    quiet: true
+  loop: >-
+    {{ (['argocd_oidc_client_id', 'argocd_oidc_client_secret'] if argocd_oidc_enabled | bool else [])
+       + argocd_repo_credentials | map(attribute='password_var') | list }}
+
+- name: Assert the repository credentials are well-formed
+  ansible.builtin.assert:
+    that:
+      - argocd_repo_credentials | selectattr('name', 'undefined') | list | length == 0
+      - argocd_repo_credentials | selectattr('url', 'undefined') | list | length == 0
+      - argocd_repo_credentials | selectattr('username', 'undefined') | list | length == 0
+      - argocd_repo_credentials | selectattr('password_var', 'undefined') | list | length == 0
+      - argocd_repo_credentials | map(attribute='name') | reject('match', '^[a-z0-9][a-z0-9-]*$') | list | length == 0
+    fail_msg: >-
+      argocd_repo_credentials entries need name (lowercase, dashes), url, username and password_var —
+      the name of the secrets.yml key holding the token, not the token itself
+    quiet: true

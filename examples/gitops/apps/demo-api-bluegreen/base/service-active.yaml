@@ -1,0 +1,15 @@
+---
+# Production traffic. The Rollouts controller adds the stable ReplicaSet's pod-template-hash
+# to this selector — do not add it yourself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-api-bg-active
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: demo-api-bg
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

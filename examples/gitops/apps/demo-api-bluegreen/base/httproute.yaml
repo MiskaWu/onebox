@@ -1,0 +1,33 @@
+---
+# Two routes, one hostname each: hostnames match at the route level, so one route per host is
+# the clean, portable way (matching a Host header inside rules is not). Both names are one label
+# under the apps domain, so the platform's wildcard covers them.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: demo-api-bg
+spec:
+  parentRefs:
+    - name: onebox
+      namespace: gateway
+  hostnames:
+    - demo-api-bg.apps.dev.example.com
+  rules:
+    - backendRefs:
+        - name: demo-api-bg-active
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: demo-api-bg-preview
+spec:
+  parentRefs:
+    - name: onebox
+      namespace: gateway
+  hostnames:
+    - demo-api-bg-preview.apps.dev.example.com
+  rules:
+    - backendRefs:
+        - name: demo-api-bg-preview
+          port: 80

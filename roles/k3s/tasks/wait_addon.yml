@@ -1,0 +1,62 @@
+---
+# Reusable: wait until k3s has applied a file from its auto-deploy directory. Other roles call
+#
+#   - ansible.builtin.include_role:
+#       name: k3s
+#       tasks_from: wait_addon.yml
+#     vars:
+#       k3s_addon_file: /var/lib/rancher/k3s/server/manifests/onebox-<name>.yaml
+#
+# k3s records the sha256 of a file on its AddOn object only after every object in the file was
+# applied (a failure leaves the old checksum and k3s retries every 15 s), so
+# "AddOn checksum == file checksum" means exactly this content is live. Waiting on that, not
+# on the file write, is what keeps a converge from reporting success for a manifest the API
+# server rejected (ADR 0022).
+#
+# Optional: k3s_addon_timeout (seconds, default 300).
+
+- name: Checksum of the manifest
+  ansible.builtin.stat:
+    path: "{{ k3s_addon_file }}"
+    checksum_algorithm: sha256
+  register: _k3s_addon_stat
+
+- name: Wait until k3s applied {{ k3s_addon_file | basename }}
+  ansible.builtin.command: >-
+    {{ k3s_bin }} kubectl --kubeconfig {{ k3s_kubeconfig }} -n kube-system get addon
+    {{ k3s_addon_file | basename | regex_replace('\.ya?ml$', '') }} -o jsonpath={.spec.checksum}
+  register: _k3s_addon_applied
+  until: _k3s_addon_applied.stdout | default('') == _k3s_addon_stat.stat.checksum | default('missing')
+  retries: "{{ ((k3s_addon_timeout | default(300) | int) / 5) | int }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Show why the manifest was not applied
+  ansible.builtin.command: >-
+    {{ k3s_bin }} kubectl --kubeconfig {{ k3s_kubeconfig }} -n kube-system get events
+    --field-selector involvedObject.kind=Addon,involvedObject.name={{ k3s_addon_file | basename | regex_replace('\.ya?ml$', '') }}
+    --sort-by=.lastTimestamp
+  register: _k3s_addon_events
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - not ansible_check_mode
+    - _k3s_addon_applied.stdout | default('') != _k3s_addon_stat.stat.checksum | default('missing')
+
+- name: Fail when k3s did not apply the manifest
+  ansible.builtin.fail:
+    msg: |
+      k3s has not applied {{ k3s_addon_file }} within {{ k3s_addon_timeout | default(300) }} s.
+      Its AddOn events (the reason is usually in the last line):
+      {{ _k3s_addon_events.stdout | default('(no events)') }}
+      {{ _k3s_addon_events.stderr | default('') }}
+      Typical causes: a kind whose CRD is not installed yet (its chart is still installing —
+      run the converge again), an admission webhook without endpoints, or an object the API
+      server rejects.
+  when:
+    - not ansible_check_mode
+    - _k3s_addon_applied.stdout | default('') != _k3s_addon_stat.stat.checksum | default('missing')

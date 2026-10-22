@@ -1,0 +1,10 @@
+---
+# Template for short-lived branch environments (one per merge request, token mr<iid>):
+# an ApplicationSet with a merge-request generator renders it with the namespace demo-mr<iid>
+# (see the README). A quota keeps a forgotten environment from eating the host.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - resourcequota.yaml
+  - limitrange.yaml

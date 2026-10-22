@@ -1,3 +1,16 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Files this role writes (tests/render.yml runs this file in render mode).
+- name: Manifests directory (render mode only; k3s creates it on a real host)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _argo_rollouts_manifests_dir }}"
+    state: directory
+    mode: "0700"
+  when: onebox_render_only | bool
+
+- name: Argo Rollouts HelmChart
+  ansible.builtin.template:
+    src: onebox-argo-rollouts.yaml.j2
+    dest: "{{ onebox_root }}{{ _argo_rollouts_manifests_dir }}/onebox-argo-rollouts.yaml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"

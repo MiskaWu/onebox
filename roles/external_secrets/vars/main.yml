@@ -1,0 +1,16 @@
+---
+# Internal values. The paths are k3s's (roles/k3s keeps its data directory at the default).
+_external_secrets_manifests_dir: /var/lib/rancher/k3s/server/manifests
+_external_secrets_static_dir: /var/lib/rancher/k3s/server/static/charts
+_external_secrets_chart_file: "onebox-external-secrets-{{ external_secrets_chart_version }}.tgz"
+_external_secrets_kubectl: "/usr/local/bin/k3s kubectl --kubeconfig {{ k3s_kubeconfig }}"
+
+# The CA bundle, base64 (as the store's caBundle field wants it): read from the host at
+# converge time (tasks/main.yml); render mode has no host file, so a recognisable
+# placeholder keeps the branch testable.
+_external_secrets_ca_b64: >-
+  {{ _external_secrets_ca.content
+     if (_external_secrets_ca.content | default('')) | length > 0
+     else ((_external_secrets_ca_placeholder | b64encode)
+           if onebox_render_only | bool and external_secrets_ca_file | length > 0 else '') }}
+_external_secrets_ca_placeholder: "-----BEGIN CERTIFICATE-----\nrender-mode placeholder\n-----END CERTIFICATE-----\n"

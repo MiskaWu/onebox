@@ -18,7 +18,7 @@ edge_extra_modules: []
 #             (`make edge-root-ca` prints it).
 # files     : a certificate you provide (edge_tls_cert_file / edge_tls_key_file), typically
 #             a wildcard for *.onebox_domain from a corporate CA.
-edge_tls_mode: acme_dns
+# (edge_tls_mode itself is set in group_vars/all/onebox.yml: cluster roles read it too.)
 edge_acme_email: "{{ onebox_admin_email }}"
 # Alternative ACME directory: Let's Encrypt staging, a private step-ca, Pebble, …
 edge_acme_ca: ""

@@ -1,0 +1,41 @@
+---
+# A shared datastore on the host, as a Service of this namespace. Pods reach the podman data
+# network directly (pod → CNI bridge → host routing → podman bridge); no LAN port, no DNS
+# detour. A selectorless Service plus an EndpointSlice pointing at the datastore's fixed
+# address on the data network keeps the application's DSN identical on podman and in the
+# cluster: postgres:5432.
+#
+# Argo CD only manages this EndpointSlice because the platform removed EndpointSlice from
+# Argo CD's default exclusions; otherwise it would be skipped while the app shows Synced.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  # No selector, no type: a ClusterIP Service whose endpoints are the slice below.
+  ports:
+    - name: postgres          # must equal the slice's port name, or the endpoint is ignored
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: postgres-data-network
+  labels:
+    # The only link between slice and Service. A typo is not an error — just a Service without
+    # endpoints and connection timeouts.
+    kubernetes.io/service-name: postgres
+addressType: IPv4
+ports:
+  - name: postgres
+    port: 5432
+    protocol: TCP
+endpoints:
+  # The datastore's fixed address on the data network (onebox_data_subnet). To move it: add
+  # the new address, check, change the host, then remove the old one.
+  - addresses:
+      - 10.89.10.10
+    conditions:
+      ready: true

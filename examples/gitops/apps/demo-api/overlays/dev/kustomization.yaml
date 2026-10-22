@@ -1,0 +1,20 @@
+---
+# demo-api in dev. Bumping newTag (CI's bump-dev job) is the deployment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: demo-dev
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/stefanprodan/podinfo
+    # An immutable tag per build (environment prefix + commit), never `latest`: a moving tag
+    # leaves Git unchanged, so nothing is deployed and nobody knows what runs.
+    newTag: 6.15.0
+patches:
+  - target:
+      kind: HTTPRoute
+      name: demo-api
+    patch: |-
+      - op: replace
+        path: /spec/hostnames/0
+        value: demo-api.apps.dev.example.com

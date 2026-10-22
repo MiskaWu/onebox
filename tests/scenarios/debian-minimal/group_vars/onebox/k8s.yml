@@ -1,0 +1,4 @@
+---
+# k8s group settings. This scenario enables no cluster component; nothing here is needed until
+# it does (then the defaults apply: wildcard gateway site under apps.<domain>, which this
+# scenario's acme_dns mode can certify).

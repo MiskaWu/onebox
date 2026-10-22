@@ -9,6 +9,9 @@ onebox_domain: dev.example.com
 onebox_host_ip: 192.0.2.10
 onebox_lan_cidrs:
   - 192.0.2.0/24
+  # k3s pods (k3s_cluster_cidr): External Secrets → OpenBao, Argo CD → OIDC issuer and Git
+  # go through the edge, whose vhosts are LAN-only by default.
+  - 10.42.0.0/16
 onebox_admin_email: admin@example.com
 
 # Pick what this host runs. Remove what you do not need; preflight checks dependencies.

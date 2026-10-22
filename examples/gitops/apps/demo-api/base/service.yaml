@@ -1,0 +1,14 @@
+---
+# ClusterIP only. The way in is HTTPRoute → cluster gateway → edge.
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: demo-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

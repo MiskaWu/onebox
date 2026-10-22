@@ -1,0 +1,6 @@
+# Managed by onebox (roles/k3s) — edits are overwritten on the next converge.
+#
+# k3s reads this file only when it starts, so a change restarts k3s. Every key is a
+# `k3s server` flag (`k3s server --help`). Add keys through k3s_extra_config, not here.
+# The pod/service CIDRs cannot be changed once the cluster exists.
+{{ _k3s_config | to_nice_yaml(indent=2) }}

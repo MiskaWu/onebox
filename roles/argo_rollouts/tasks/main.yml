@@ -1,4 +1,74 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Argo Rollouts controller (ADR 0015), verified by the controller becoming available — it loads
+# the traffic-router plugin at start and does not run with a plugin it could not load.
+
+- name: Check that k3s is running
+  ansible.builtin.stat:
+    path: "{{ _argo_rollouts_static_dir }}"
+  register: _argo_rollouts_static
+
+- name: Assert k3s is deployed first
+  ansible.builtin.assert:
+    that:
+      - _argo_rollouts_static.stat.isdir | default(false)
+    fail_msg: "k3s is not running yet ({{ _argo_rollouts_static_dir }} is missing): run `sudo make k3s` first"
+    quiet: true
+
+- name: Argo Rollouts chart archive (pinned, served by k3s)
+  ansible.builtin.get_url:
+    url: "{{ argo_rollouts_chart_url }}"
+    dest: "{{ _argo_rollouts_static_dir }}/{{ _argo_rollouts_chart_file }}"
+    checksum: "sha256:{{ argo_rollouts_chart_sha256 }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Write the manifest
   ansible.builtin.include_tasks: render.yml
+
+- name: Wait until k3s applied the HelmChart
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _argo_rollouts_manifests_dir }}/onebox-argo-rollouts.yaml"
+
+- name: Wait for the controller to become available
+  ansible.builtin.command: >-
+    {{ _argo_rollouts_kubectl }} -n {{ argo_rollouts_namespace }} rollout status deployment/argo-rollouts --timeout=10s
+  register: _argo_rollouts_status
+  until: _argo_rollouts_status.rc == 0
+  retries: "{{ (argo_rollouts_ready_timeout | int / 15) | int }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Read the controller's plugin log lines
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      {{ _argo_rollouts_kubectl }} -n {{ argo_rollouts_namespace }} logs deployment/argo-rollouts --tail=500
+      | grep -i -e plugin -e checksum | tail -n 5
+    executable: /bin/bash
+  register: _argo_rollouts_plugin_log
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - not ansible_check_mode
+    - argo_rollouts_gatewayapi_plugin_enabled | bool
+
+- name: Fail when the controller is not available
+  ansible.builtin.fail:
+    msg: |
+      deployment/argo-rollouts is not available after {{ argo_rollouts_ready_timeout }} s:
+        {{ _argo_rollouts_status.stdout | default('') }} {{ _argo_rollouts_status.stderr | default('') }}
+      Plugin-related log lines:
+        {{ _argo_rollouts_plugin_log.stdout | default('(none)') }}
+      A plugin that cannot be downloaded (no route to github.com) or fails its checksum keeps the
+      controller from starting: check argo_rollouts_gatewayapi_plugin_sha256, or disable the plugin.
+  when:
+    - not ansible_check_mode
+    - _argo_rollouts_status.rc | default(1) != 0

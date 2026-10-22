@@ -1,0 +1,38 @@
+---
+# The dev environment itself: Namespace, quota and defaults for demo-dev.
+# Picked up by the tenant's root pointer (demo-root): adding a file here is how a service or an
+# environment comes into being — no kubectl apply, no platform change.
+# Name: <tenant>-<component>-<env>. It is the identity: renaming creates a second Application
+# next to the old one (the root does not prune) — delete the old one by hand.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-env-dev
+  namespace: argocd
+spec:
+  # The tenant's AppProject: this repository, demo-* namespaces.
+  project: demo
+  source:
+    repoURL: https://gitlab.dev.example.com/demo/gitops.git
+    targetRevision: main
+    path: envs/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo-dev
+  syncPolicy:
+    # A push to main is the deployment (the gate is the CI bump of the image tag). Nothing is
+    # pruned or reverted automatically: hash-suffixed ConfigMaps from kustomize accumulate and
+    # keep the app OutOfSync — that is not a failure.
+    automated:
+      prune: false
+      selfHeal: false
+    syncOptions:
+      # Namespaces are declared explicitly (envs/), with the labels the platform relies on.
+      - CreateNamespace=false
+    # The environment's Namespace may not exist yet on the very first sync.
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

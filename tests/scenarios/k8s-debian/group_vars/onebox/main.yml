@@ -1,0 +1,40 @@
+---
+# k8s group, Debian family: HTTP-01 certificates (so no wildcard site: explicit gateway
+# hostnames only), no host firewall, no SSO (local admin only), no tenants and an unlocked
+# default project, no pull secrets, canary plugin off, pinned cluster DNS names, no CA.
+onebox_env: test
+onebox_os_family: Debian
+onebox_domain: lab.example.test
+onebox_host_ip: 198.51.100.20
+onebox_lan_cidrs: [198.51.100.0/24, 10.42.0.0/16]
+onebox_components:
+  - edge
+  - k3s
+  - k3s-gateway
+  - external-secrets
+  - argocd
+  - argo-rollouts
+common_firewall_backend: none
+edge_tls_mode: acme_http
+
+# roles/k3s
+k3s_selinux: false
+k3s_secrets_encryption: false
+k3s_coredns_hosts:
+  bao.lab.example.test: 198.51.100.20
+  login.lab.example.test: 198.51.100.20
+
+# roles/k3s_gateway
+k3s_gateway_edge_wildcard: false
+k3s_gateway_hostnames:
+  - hostname: demo-api.apps.lab.example.test
+    title: Demo API
+  - hostname: demo-mqtt.apps.lab.example.test
+    portal: false
+    internal_only: false
+
+# roles/argocd (no OIDC issuer: casdoor is not a component and none is set)
+argocd_lock_default_project: false
+
+# roles/argo_rollouts
+argo_rollouts_gatewayapi_plugin_enabled: false

@@ -1,0 +1,61 @@
+---
+# No namespace: the Application's destination (and the overlay) decide it.
+# Never hostNetwork, hostPort, NodePort or LoadBalancer: they bypass the edge, and a host port
+# the cluster gateway needs keeps the gateway — and every HTTP route — from starting.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-api
+    spec:
+      # The platform delivers this Secret into labelled namespaces but attaches it to nothing:
+      # list it yourself. Harmless for public images (here: podinfo, a demo HTTP server).
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: demo-api
+          # No tag here: the overlay's `images:` sets it — one place to bump per environment.
+          image: ghcr.io/stefanprodan/podinfo
+          ports:
+            - name: http
+              containerPort: 9898
+          env:
+            - name: PODINFO_UI_MESSAGE
+              valueFrom:
+                secretKeyRef:
+                  name: demo-api-secrets
+                  key: ui_message
+                  # The demo still starts before the value exists in OpenBao.
+                  optional: true
+            # The same string as on the host's podman network: `postgres` is a Service in this
+            # namespace (postgres.yaml), not an IP.
+            - name: DATABASE_HOST
+              value: postgres
+          # Without readiness, a rollout sends traffic to pods that are not ready yet.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # The host also runs services the cluster cannot see: always set limits.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

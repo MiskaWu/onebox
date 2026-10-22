@@ -1,0 +1,15 @@
+---
+# demo-api released blue/green: a Rollout instead of a Deployment, two Services, two routes.
+# A new image starts next to the old one and waits on the preview hostname; a person promotes
+# it. Deployment is automatic (the bump), switching traffic is a decision — two separate gates.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rollout.yaml
+  - service-active.yaml
+  - service-preview.yaml
+  - httproute.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: demo-api-bg
+    includeSelectors: true

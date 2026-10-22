@@ -1,0 +1,52 @@
+---
+# Same pod template as a Deployment; only `strategy` differs. Blue/green switches the two
+# Services' selectors — it needs no router support (works with HTTPRoute, Ingress, raw TCP),
+# so it does not depend on the Gateway API plugin, which only canaries use.
+#
+#   kubectl argo rollouts -n demo-dev get rollout demo-api-bg --watch
+#   kubectl argo rollouts -n demo-dev promote demo-api-bg      # preview becomes active
+#   kubectl argo rollouts -n demo-dev undo demo-api-bg         # back to the previous version
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: demo-api-bg
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-api-bg
+  strategy:
+    blueGreen:
+      activeService: demo-api-bg-active
+      previewService: demo-api-bg-preview
+      # A person promotes after checking the preview hostname.
+      autoPromotionEnabled: false
+      # How long the old ReplicaSet keeps running after a promotion: the window for an instant undo.
+      scaleDownDelaySeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-api-bg
+    spec:
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: demo-api
+          image: ghcr.io/stefanprodan/podinfo
+          ports:
+            - name: http
+              containerPort: 9898
+          # "Preview is ready" means exactly this probe — without it, promotion is blind.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

@@ -1,0 +1,98 @@
+# Managed by onebox (roles/argocd) — k3s applies this file from its manifests directory.
+#
+# Tenant boundaries and app-of-apps pointers (ADR 0016), derived from argocd_tenants. Needs the
+# Argo CD CRDs, so k3s retries this file until the chart is installed. Always rendered: a tenant
+# removed from the list is pruned from the cluster (its AppProject and root pointer only —
+# workloads and child Applications stay, see the root's missing finalizer below).
+{% set roots = argocd_tenants %}
+{% if roots | length > 0 %}
+---
+# Root pointers create Application objects in the {{ argocd_namespace }} namespace — a right no tenant
+# project may have (it would let a tenant edit everyone's subscriptions). Hence a project of
+# their own that may create Applications there and nothing else.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform-roots
+  namespace: {{ argocd_namespace }}
+spec:
+  description: App-of-apps root pointers of every tenant (platform-owned)
+  sourceRepos:
+{% for tenant in roots %}
+    - {{ tenant.repo | to_json }}
+{% endfor %}
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: {{ argocd_namespace }}
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: argoproj.io
+      kind: Application
+{% endif %}
+{% for tenant in argocd_tenants %}
+---
+# Tenant {{ tenant.name }}: its own repositories, its own namespaces, no cluster-scoped kinds but Namespace.
+# Orphaned-resource warnings stay off: Secrets produced by External Secrets belong to no Application.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {{ tenant.name }}
+  namespace: {{ argocd_namespace }}
+spec:
+  description: Tenant boundary for {{ tenant.name }}
+  sourceRepos:
+{% for repo in [tenant.repo] + tenant.source_repos | default([]) %}
+    - {{ repo | to_json }}
+{% endfor %}
+  destinations:
+{% for ns in tenant.namespaces | default([tenant.name ~ '-*']) %}
+    - server: https://kubernetes.default.svc
+      namespace: {{ ns | to_json }}
+{% endfor %}
+  clusterResourceWhitelist:
+{% for kind in tenant.cluster_resources | default([{'group': '', 'kind': 'Namespace'}]) %}
+    - group: {{ kind.group | to_json }}
+      kind: {{ kind.kind }}
+{% endfor %}
+---
+# Root pointer of {{ tenant.name }}: every file in {{ tenant.path | default('applications') }}/ of its repository is a child
+# Application. It belongs to the platform (it cannot live in the repository it points at).
+# No resources-finalizer on purpose: with it, deleting this object — including k3s pruning it
+# when the tenant leaves argocd_tenants — would cascade into every workload of the tenant.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ tenant.name }}-root
+  namespace: {{ argocd_namespace }}
+spec:
+  project: platform-roots
+  source:
+    repoURL: {{ tenant.repo | to_json }}
+    targetRevision: {{ tenant.revision | default('main') }}
+    path: {{ tenant.path | default('applications') }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ argocd_namespace }}
+  syncPolicy:
+    # Git changes are applied; nothing is pruned or reverted behind anyone's back (ADR 0016).
+    automated:
+      prune: false
+      selfHeal: false
+{% endfor %}
+{% if argocd_lock_default_project | bool %}
+---
+# The built-in project allows everything and cannot be deleted; `project: default` would bypass
+# every tenant boundary. Locked: no sources, no destinations, and an *explicit* empty cluster
+# whitelist (Argo CD creates `default` with */*, and applying a manifest leaves undeclared
+# fields alone). Unlocking = argocd_lock_default_project: false (k3s prunes this object and Argo
+# CD recreates its permissive default).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: {{ argocd_namespace }}
+spec:
+  sourceRepos: []
+  destinations: []
+  clusterResourceWhitelist: []
+{% endif %}

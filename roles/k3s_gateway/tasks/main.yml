@@ -1,4 +1,198 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# The cluster gateway (ADR 0015): Gateway API CRDs → Traefik CRDs → Traefik HelmChart, each
+# applied by k3s and confirmed before the next one is written, then verified from the edge's
+# side of the socket.
+
+# ── Prerequisites ────────────────────────────────────────────────────────────────────
+- name: Check that k3s is running
+  ansible.builtin.stat:
+    path: "{{ _k3s_gateway_static_dir }}"
+  register: _k3s_gateway_static
+
+- name: Assert k3s is deployed first
+  ansible.builtin.assert:
+    that:
+      - _k3s_gateway_static.stat.isdir | default(false)
+    fail_msg: "k3s is not running yet ({{ _k3s_gateway_static_dir }} is missing): run `sudo make k3s` first"
+    quiet: true
+
+# An entrypoint that cannot bind keeps the whole hostNetwork pod from starting — every HTTP
+# route, Argo CD included, goes down with it. Check addresses and current holders first.
+- name: Assert every TCP entrypoint binds an address of this host
+  ansible.builtin.assert:
+    that:
+      - (item.bind_ip | default(k3s_gateway_tcp_bind_ip)) in ansible_facts['all_ipv4_addresses'] | default([])
+    fail_msg: >-
+      {{ item.name }} would bind {{ item.bind_ip | default(k3s_gateway_tcp_bind_ip) }}, which is not an address
+      of this host ({{ ansible_facts['all_ipv4_addresses'] | default([]) | join(', ') }}). Set bind_ip (or
+      k3s_gateway_tcp_bind_ip) to a local address — onebox_host_ip may be a NAT address.
+    quiet: true
+  loop: "{{ k3s_gateway_tcp_entrypoints }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Every listener on the port that is not Traefik itself (Traefik holding it = steady state).
+# Per socket, not per port: Traefik on one address and another process on 0.0.0.0 still clash.
+- name: Find other holders of the gateway's ports
+  ansible.builtin.shell:
+    cmd: set -o pipefail; ss -Hltnp sport = :{{ item }} | { grep -v '"traefik"' || true; }
+    executable: /bin/bash
+  loop: "{{ _k3s_gateway_internal_ports + k3s_gateway_tcp_entrypoints | map(attribute='port') | list }}"
+  register: _k3s_gateway_holders
+  changed_when: false
+  check_mode: false
+
+# Look at the process name, not just "something listens": a forgotten
+# `kubectl port-forward --address 0.0.0.0` looks exactly like a workload holding the port.
+- name: Assert no other process holds a gateway port
+  ansible.builtin.assert:
+    that:
+      - _busy | length == 0
+    fail_msg: >-
+      ports held by something other than Traefik: {{ _busy | join(', ') }}. `sudo ss -ltnp` shows the
+      process; usual suspects are a kubectl port-forward, a pod with hostNetwork/hostPort, or a host
+      service. The gateway manifest was not changed.
+    quiet: true
+  vars:
+    _busy: >-
+      {{ _k3s_gateway_holders.results | rejectattr('stdout', 'equalto', '') | map(attribute='item') | list }}
+
+# ── CRDs ─────────────────────────────────────────────────────────────────────────────
+# Upstream file, pinned; get_url does not download again while the checksum matches, so
+# routine converges stay offline. The file sorts before onebox-k3s-gateway.yaml.
+- name: Gateway API CRDs (Standard channel, pinned)
+  ansible.builtin.get_url:
+    url: "{{ _k3s_gateway_gatewayapi_url }}"
+    dest: "{{ _k3s_gateway_manifests_dir }}/onebox-gateway-api-crds.yaml"
+    checksum: "sha256:{{ k3s_gateway_gatewayapi_sha256 }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Wait until k3s applied the Gateway API CRDs
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _k3s_gateway_manifests_dir }}/onebox-gateway-api-crds.yaml"
+
+- name: Traefik chart archive (pinned, served by k3s)
+  ansible.builtin.get_url:
+    url: "{{ k3s_gateway_chart_url }}"
+    dest: "{{ _k3s_gateway_static_dir }}/{{ _k3s_gateway_chart_file }}"
+    checksum: "sha256:{{ k3s_gateway_chart_sha256 }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+# Helm installs a chart's crds/ directory on first install only and never upgrades it. The
+# Traefik CRDs are therefore taken from the pinned chart and applied by k3s, so a chart bump
+# also updates them (Hub CRDs are left out: Traefik Hub is not used).
+- name: Directory for the unpacked chart
+  ansible.builtin.file:
+    path: /var/lib/onebox/k3s-gateway/traefik-{{ k3s_gateway_chart_version }}
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Unpack the chart
+  ansible.builtin.unarchive:
+    src: "{{ _k3s_gateway_static_dir }}/{{ _k3s_gateway_chart_file }}"
+    dest: /var/lib/onebox/k3s-gateway/traefik-{{ k3s_gateway_chart_version }}
+    remote_src: true
+    creates: /var/lib/onebox/k3s-gateway/traefik-{{ k3s_gateway_chart_version }}/traefik/crds
+
+- name: Traefik CRDs from the pinned chart
+  ansible.builtin.assemble:
+    src: /var/lib/onebox/k3s-gateway/traefik-{{ k3s_gateway_chart_version }}/traefik/crds
+    regexp: '^traefik\.io_.*\.yaml$'
+    dest: "{{ _k3s_gateway_manifests_dir }}/onebox-k3s-gateway-crds.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Wait until k3s applied the Traefik CRDs
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _k3s_gateway_manifests_dir }}/onebox-k3s-gateway-crds.yaml"
+
+# ── The gateway ──────────────────────────────────────────────────────────────────────
+- name: Write the gateway manifest
   ansible.builtin.include_tasks: render.yml
+
+- name: Wait until k3s applied the gateway HelmChart
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: wait_addon.yml
+  vars:
+    k3s_addon_file: "{{ _k3s_gateway_manifests_dir }}/onebox-k3s-gateway.yaml"
+
+# Raw TCP entrypoints are host-native sockets: firewalld really filters them (ADR 0007).
+# Ensure-present only — removing an entry does not close its port.
+- name: Collect the firewall rules of the raw TCP entrypoints
+  ansible.builtin.set_fact:
+    _k3s_gateway_fw_rules: >-
+      {{ _k3s_gateway_fw_rules | default([])
+         + [{'port': item.port, 'proto': 'tcp', 'sources': item.allowed_cidrs | default(onebox_lan_cidrs)}] }}
+  loop: "{{ k3s_gateway_tcp_entrypoints }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Open the raw TCP entrypoints
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: firewall_open.yml
+  vars:
+    common_fw_rules: "{{ _k3s_gateway_fw_rules }}"
+  when: k3s_gateway_tcp_entrypoints | length > 0
+
+# ── Verify from the data path (ADR 0022) ─────────────────────────────────────────────
+# The essential property: the HTTP entrypoint listens on 127.0.0.1 and nowhere else, and it is
+# Traefik answering. A 404 for an unknown Host is Traefik's own answer.
+- name: Wait for Traefik to answer on the loopback port
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ k3s_gateway_http_port }}/"
+    headers:
+      Host: onebox-gateway-probe.invalid
+    status_code: [404]
+  register: _k3s_gateway_probe
+  until: _k3s_gateway_probe.status == 404
+  retries: 60
+  delay: 5
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Read the gateway's listening sockets
+  ansible.builtin.command: ss -Hltnp sport = :{{ k3s_gateway_http_port }}
+  register: _k3s_gateway_listen
+  changed_when: false
+  check_mode: false
+
+- name: Assert the gateway listens on loopback only
+  ansible.builtin.assert:
+    that:
+      - "'traefik' in _k3s_gateway_listen.stdout"
+      - "'127.0.0.1:' ~ k3s_gateway_http_port in _k3s_gateway_listen.stdout"
+      - "'0.0.0.0:' ~ k3s_gateway_http_port not in _k3s_gateway_listen.stdout"
+      - "'*:' ~ k3s_gateway_http_port not in _k3s_gateway_listen.stdout"
+    fail_msg: >-
+      port {{ k3s_gateway_http_port }} must be held by Traefik on 127.0.0.1 only; found:
+      {{ _k3s_gateway_listen.stdout | default('(nothing)') }}
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Read the Gateway's Programmed condition
+  ansible.builtin.command: >-
+    {{ _k3s_gateway_kubectl }} -n {{ k3s_gateway_namespace }} get gateway {{ k3s_gateway_name }}
+    -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}'
+  register: _k3s_gateway_programmed
+  until: _k3s_gateway_programmed.stdout == 'True'
+  retries: 24
+  delay: 5
+  changed_when: false
+  failed_when: _k3s_gateway_programmed.stdout != 'True'
+  check_mode: false
+  when: not ansible_check_mode

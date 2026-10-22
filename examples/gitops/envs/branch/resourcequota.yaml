@@ -1,0 +1,13 @@
+---
+# Per branch environment: room for one service at its limits (1 CPU / 1 Gi) twice over — the
+# headroom is for the terminating pod during a rollout, which the quota still counts. Size it
+# from your own base limits × 2, and cap the number of concurrent environments by host memory.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: branch-environment
+spec:
+  hard:
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    pods: "4"

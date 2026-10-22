@@ -1,3 +1,25 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Checks that need no running cluster. Runs from roles/preflight before anything changes.
+
+- name: Assert the version pins are consistent
+  ansible.builtin.assert:
+    that:
+      - argo_rollouts_chart_sha256 | length == 64
+      - argo_rollouts_gatewayapi_plugin_sha256 is mapping
+    fail_msg: "argo_rollouts_chart_sha256 and argo_rollouts_gatewayapi_plugin_sha256 (per arch) must be set"
+    quiet: true
+
+# The plugin edits HTTPRoutes; without the Gateway API it fails only when the first canary
+# Rollout runs — far away from the cause.
+- name: Assert the Gateway API is available for the canary plugin
+  ansible.builtin.assert:
+    that:
+      - "'k3s-gateway' in onebox_components"
+      - argo_rollouts_arch in argo_rollouts_gatewayapi_plugin_sha256
+    fail_msg: >-
+      argo_rollouts_gatewayapi_plugin_enabled needs the k3s-gateway component (Gateway API CRDs) and a
+      pinned plugin checksum for '{{ argo_rollouts_arch }}'; or disable the plugin — blue/green does not need it
+    quiet: true
+  when:
+    - argo_rollouts_gatewayapi_plugin_enabled | bool
+    - not onebox_render_only | bool

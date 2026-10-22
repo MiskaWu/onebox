@@ -1,0 +1,10 @@
+---
+# demo-api-bluegreen in dev. Bumping newTag starts a blue/green release; it stops at preview.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: demo-dev
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/stefanprodan/podinfo
+    newTag: 6.15.0

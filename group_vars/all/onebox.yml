@@ -59,6 +59,15 @@ edge_admin_mode: unix
 edge_admin_socket: /run/caddy/admin.sock
 # Vhosts are LAN-only (403 for other sources) unless an entry sets internal_only: false.
 edge_internal_only_default: true
+# How the edge obtains certificates (details in roles/caddy_edge/defaults). Global because
+# cluster roles read it: wildcard support, and which CA in-cluster clients must trust.
+edge_tls_mode: acme_dns
+# PEM bundle that clients inside the cluster (and containerd) must trust to reach the edge:
+# empty for publicly trusted ACME certificates, Caddy's root for the internal CA. Point it at
+# your CA bundle when edge_tls_mode is files with a private CA.
+onebox_edge_ca_file: >-
+  {{ (edge_data_dir ~ '/.local/share/caddy/pki/authorities/local/root.crt')
+     if edge_tls_mode == 'internal' else '' }}
 
 # ── Single sign-on ───────────────────────────────────────────────────────────────────
 # OIDC issuer the services trust. Defaults to the bundled Casdoor; point it at any OIDC
@@ -95,8 +104,14 @@ onebox_os_family: "{{ ansible_facts['os_family'] | default('unknown') }}"
 # Private podman network the shared datastores and their client apps join.
 onebox_data_network: onebox-data
 onebox_data_subnet: 10.89.10.0/24
-# kubeconfig written by the k3s role and read by every role that talks to the cluster.
+# ── Cluster contract (roles/k3s, read by every cluster role) ─────────────────────────
 k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+# Must not overlap podman's networks (10.88.0.0/16 default, onebox_data_subnet) or the LAN.
+k3s_cluster_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+# Narrowed from 30000-32767: kube-proxy DNATs NodePorts on 127.0.0.1 too, so a Service that
+# drew the gateway's loopback port would silently capture the edge's traffic to it.
+k3s_service_node_port_range: 30000-30999
 # Loopback port the in-cluster gateway listens on; the edge proxies cluster hostnames here.
 k3s_gateway_http_port: 31080
 
