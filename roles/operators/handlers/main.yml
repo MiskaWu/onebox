@@ -1,0 +1,9 @@
+---
+# try-reload-or-restart: reload a running sshd (new connections get the new config, open
+# sessions are untouched) and do nothing when it is not running — with Ubuntu's socket
+# activation that is normal, and the next connection starts sshd with the new config.
+# Starting ssh.service by hand there would fight ssh.socket for the port.
+- name: Reload sshd
+  ansible.builtin.command: systemctl try-reload-or-restart {{ _operators_sshd_service }}
+  changed_when: true
+  when: not onebox_render_only | bool

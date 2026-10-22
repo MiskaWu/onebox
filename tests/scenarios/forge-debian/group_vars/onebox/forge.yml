@@ -1,0 +1,39 @@
+---
+# forge roles: settings for this scenario.
+
+# ── storage ──
+storage_mounts:
+  - {what: "nas.example.test:/export/backup", where: /srv/backup, type: nfs4, options: "defaults,nofail,_netdev,noatime"}
+  - {what: LABEL=onebox-data, where: /srv/data, type: xfs}
+storage_lvs:
+  - {vg: vg0, name: spare, size: 50G}
+
+# ── operators ──
+operators_create_accounts: false
+operators_sudo_nopasswd: true
+operators_admins:
+  - name: alice
+    ssh_keys: [ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUseExampleKeyDoNotUse0 alice@laptop]
+  - name: dave
+    ssh_keys: []
+
+# ── tailscale ──
+tailscale_repo_distro: ubuntu
+tailscale_repo_codename: noble
+
+# ── gitlab ──
+gitlab_registry_enabled: false
+gitlab_smtp_enabled: true
+gitlab_smtp_host: relay.lab.example.test
+gitlab_smtp_port: 465
+gitlab_smtp_tls: tls
+gitlab_smtp_authentication: ""
+gitlab_bundled_monitoring: true
+gitlab_malloc_conf: ""
+
+# ── gitlab-runner ──
+gitlab_runner_repo_distro: ubuntu
+gitlab_runner_repo_codename: noble
+gitlab_runner_binfmt_enabled: true
+gitlab_runner_prune_all_images: true
+gitlab_runner_extra_packages: [jq]

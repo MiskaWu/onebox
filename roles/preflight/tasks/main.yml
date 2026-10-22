@@ -45,9 +45,11 @@
 
 - name: Run each selected component's own checks
   ansible.builtin.include_role:
-    name: "{{ {'edge': 'caddy_edge'}[item] | default(item | replace('-', '_')) }}"
+    name: "{{ {'edge': 'caddy_edge'}[_preflight_component] | default(_preflight_component | replace('-', '_')) }}"
     tasks_from: preflight.yml
     apply:
       tags: [always]
   loop: "{{ onebox_components }}"
-  when: ('all' in ansible_run_tags) or (item in ansible_run_tags)
+  loop_control:
+    loop_var: _preflight_component
+  when: ('all' in ansible_run_tags) or (_preflight_component in ansible_run_tags)

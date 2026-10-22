@@ -8,7 +8,7 @@
 #       description: Git forge               portal card text
 #       portal: true                          list it on the portal page
 #       internal_only: true                   default edge_internal_only_default
-#       allow_cidrs: [10.0.0.0/8]             default onebox_lan_cidrs
+#       allow_cidrs: [10.0.0.0/8]             default onebox_internal_cidrs
 #       lb_try_duration: 5s                   retry while the upstream restarts
 #       stream_close_delay: 5m                keep WebSockets open across reloads
 #       directives: ["encode zstd gzip"]      extra lines inside the site block

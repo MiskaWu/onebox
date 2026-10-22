@@ -113,7 +113,7 @@ Non-HTTP traffic is off by default; in order of preference (ADR 0015):
    k3s_gateway_tcp_entrypoints:
      - name: demo-mqtt        # = spec.entryPoints of the workload's IngressRouteTCP
        port: 1883
-       allowed_cidrs: [192.0.2.0/24]   # firewalld sources (default onebox_lan_cidrs)
+       allowed_cidrs: [192.0.2.0/24]   # firewalld sources (default onebox_internal_cidrs)
    ```
 
    Bound to `k3s_gateway_tcp_bind_ip` (default `onebox_host_ip`, never `0.0.0.0`), opened in

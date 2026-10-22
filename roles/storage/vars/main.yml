@@ -1,0 +1,61 @@
+---
+# Internal values derived from storage_mounts + storage_lvs. Not meant to be overridden.
+
+# One backslash, spelled by YAML: Jinja string literals treat backslashes differently across
+# ansible-core versions, so templates never write one themselves.
+_storage_backslash: "\\"
+
+# File system types that live on the network: their units order after the network and
+# hang off remote-fs.target instead of local-fs.target.
+_storage_network_types: [nfs, nfs4, cifs, smb3, ceph, glusterfs, fuse.sshfs]
+
+# Packages a mount or LV of a given kind needs (same names on both OS families except NFS,
+# which comes from vars/<family>.yml as _storage_nfs_packages).
+_storage_fs_packages:
+  xfs: [xfsprogs]
+  ext4: [e2fsprogs]
+  cifs: [cifs-utils]
+  smb3: [cifs-utils]
+
+# Every mount this role manages: the storage_mounts entries plus one per LV that has a
+# `where`. Each item gains:
+#   unit    systemd unit name, derived from `where` exactly like `systemd-escape -p --suffix=mount`
+#           for the character set preflight allows ([A-Za-z0-9_.-] path components): "/"
+#           becomes "-" and a literal "-" becomes "\x2d".
+#   device  What= for the unit: UUID=/PARTUUID=/LABEL= become their /dev/disk/by-* links so
+#           systemd can tie the mount to the device unit (it only does that for /dev paths).
+#   network true for network file systems
+_storage_mounts: |
+  {% set out = [] %}
+  {% set lv_mounts = [] %}
+  {% for lv in storage_lvs if lv.where is defined %}
+  {%   set _ = lv_mounts.append({'what': '/dev/' ~ lv.vg ~ '/' ~ lv.name, 'where': lv.where,
+                                 'type': lv.fs | default('auto')}
+                                | combine(lv | dict2items
+                                             | selectattr('key', 'in', ['options', 'owner', 'group', 'mode'])
+                                             | items2dict)) %}
+  {% endfor %}
+  {% for m in storage_mounts + lv_mounts %}
+  {%   set what = m.what | string %}
+  {%   if what is match('UUID=') %}{% set device = '/dev/disk/by-uuid/' ~ what[5:] %}
+  {%   elif what is match('PARTUUID=') %}{% set device = '/dev/disk/by-partuuid/' ~ what[9:] %}
+  {%   elif what is match('LABEL=') %}{% set device = '/dev/disk/by-label/' ~ what[6:] %}
+  {%   else %}{% set device = what %}
+  {%   endif %}
+  {%   set _ = out.append(m | combine({
+         'unit': (m.where | regex_replace('^/+', '') | regex_replace('/+$', '')
+                  | replace('-', _storage_backslash ~ 'x2d') | replace('/', '-')) ~ '.mount',
+         'device': device,
+         'type': m.type | default('auto'),
+         'options': m.options | default(storage_mount_options_default),
+         'network': (m.type | default('auto')) in _storage_network_types
+                    or '_netdev' in (m.options | default(storage_mount_options_default)).split(',')})) %}
+  {% endfor %}
+  {{ out }}
+
+_storage_packages: >-
+  {{ ((['lvm2'] if storage_lvs | length > 0 else [])
+      + (_storage_mounts | map(attribute='type') | list + storage_lvs | map(attribute='fs', default='') | list)
+        | unique | map('extract', _storage_fs_packages | combine({'nfs': _storage_nfs_packages, 'nfs4': _storage_nfs_packages}))
+        | select('defined') | flatten)
+     | unique }}

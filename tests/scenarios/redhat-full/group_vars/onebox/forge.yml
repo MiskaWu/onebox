@@ -1,0 +1,22 @@
+---
+# forge roles (operators, storage, tailscale, gitlab, gitlab-runner) in the full scenario.
+storage_lvs:
+  - {vg: vg0, name: gitlab, size: 100G, fs: xfs, where: /srv/gitlab, mode: "0700"}
+  - {vg: vg0, name: gitlab-runner, size: 80G, fs: xfs, where: /var/lib/gitlab-runner}
+storage_mounts:
+  - {what: UUID=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0, where: /srv/backup, type: xfs, mode: "0700"}
+
+operators_admins:
+  - name: alice
+    ssh_keys: [ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUseExampleKeyDoNotUse0 alice@laptop]
+operators_console_only: [rescue]
+
+tailscale_repo_el_major: "9"
+
+gitlab_ssh_enabled: true            # admin sshd is on 2222 in this scenario
+gitlab_backup_dir: /srv/backup/gitlab
+gitlab_required_mounts: [/srv/gitlab, /srv/backup]
+gitlab_backup_schedule: "*-*-* 02:30:00"
+
+gitlab_runner_repo_el_major: "9"
+gitlab_runner_home_must_be_mount: true

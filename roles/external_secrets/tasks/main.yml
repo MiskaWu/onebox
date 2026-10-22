@@ -87,7 +87,7 @@
       ClusterSecretStore {{ external_secrets_store_name }} is not Ready:
         {{ _external_secrets_conditions.stdout | default('(no status)') }}
       Usual causes, by message:
-        403 / Forbidden       the edge refused the pod address: add k3s_cluster_cidr to onebox_lan_cidrs
+        403 / Forbidden       the edge refused the pod address: is k3s_pods_trusted_by_edge false?
         no such host          pods cannot resolve {{ external_secrets_openbao_url | urlsplit('hostname') }}: k3s_coredns_hosts
         x509 / certificate    set external_secrets_ca_file to the edge's CA
         permission denied     OpenBao's kubernetes auth role {{ openbao_eso_role }} does not bind

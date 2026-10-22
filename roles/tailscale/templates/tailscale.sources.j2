@@ -1,0 +1,7 @@
+# Managed by onebox (roles/tailscale) — edits are overwritten on the next converge.
+# Official Tailscale repository; the key is pinned by checksum in roles/tailscale/defaults.
+Types: deb
+URIs: {{ tailscale_repo_url }}/{{ tailscale_repo_distro }}
+Suites: {{ tailscale_repo_codename }}
+Components: main
+Signed-By: {{ _tailscale_key_file }}

@@ -1,0 +1,17 @@
+# Managed by onebox (roles/gitlab) — edits are overwritten on the next converge.
+# Run on demand (`systemctl start gitlab-backup`, waits until done) or from gitlab-backup.timer.
+[Unit]
+Description=GitLab backup (data archive and configuration archive)
+Documentation=https://docs.gitlab.com/administration/backup_restore/
+
+[Service]
+Type=oneshot
+# Data: repositories, database, uploads, LFS, artifacts, registry (minus SKIP). STRATEGY=copy
+# copies files before archiving, avoiding "file changed as we read it" on a live instance.
+ExecStart=/usr/bin/podman exec gitlab gitlab-backup create CRON=1 STRATEGY=copy{{ (' SKIP=' ~ (gitlab_backup_skip | join(','))) if gitlab_backup_skip | length > 0 else '' }}
+# Configuration: gitlab.rb, gitlab-secrets.json (the keys that decrypt CI variables, 2FA and
+# runner tokens in the database — not part of the data archive) and the onebox secret files.
+# Keep a copy of these apart from the data archives.
+ExecStart=/usr/bin/podman exec gitlab gitlab-ctl backup-etc --backup-path /var/opt/gitlab/backups/config --delete-old-backups
+Nice=10
+IOSchedulingClass=idle

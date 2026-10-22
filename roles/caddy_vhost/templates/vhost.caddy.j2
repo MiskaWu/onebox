@@ -4,7 +4,7 @@
 {{ e.hostname }} {
 	import onebox_site
 {% if e.internal_only | default(edge_internal_only_default) %}
-	import onebox_internal_only {{ (e.allow_cidrs | default(onebox_lan_cidrs)) | join(' ') }}
+	import onebox_internal_only {{ (e.allow_cidrs | default(onebox_internal_cidrs)) | join(' ') }}
 {% endif %}
 {% for d in e.directives | default([]) %}
 	{{ d }}

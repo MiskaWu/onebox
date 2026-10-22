@@ -1,4 +1,161 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Logical volumes first (a mount may sit on one), then the mount units, then ownership of
+# the mounted roots. Nothing here formats a disk; see defaults/main.yml for the one opt-in
+# (an LV's `fs`), and the README for why the line is drawn there.
+
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+- name: Install LVM and file system tools
+  ansible.builtin.package:
+    name: "{{ _storage_packages }}"
+    state: present
+  when: _storage_packages | length > 0
+
+# Two sources of truth for one mount point is a trap: systemd prefers our unit in
+# /etc/systemd/system over the one its fstab generator makes, but `mount -a`, a human
+# reading fstab, and the next person to "fix" the disk all see the fstab line.
+- name: Read /etc/fstab
+  ansible.builtin.slurp:
+    src: /etc/fstab
+  register: _storage_fstab
+  failed_when: false   # no fstab at all is fine
+
+- name: Assert no managed mount point is also in /etc/fstab
+  ansible.builtin.assert:
+    that:
+      - _storage_fstab_points | intersect(_storage_mounts | map(attribute='where')) | length == 0
+    fail_msg: >-
+      /etc/fstab also mounts {{ _storage_fstab_points | intersect(_storage_mounts | map(attribute='where')) | join(', ') }}.
+      Remove those lines (and run `systemctl daemon-reload`): this role owns these mounts as
+      systemd units, and two definitions drift apart.
+    quiet: true
+  vars:
+    _storage_fstab_points: >-
+      {{ (_storage_fstab.content | default('') | b64decode).splitlines()
+         | map('regex_replace', '#.*$', '') | map('trim') | select
+         | map('split') | selectattr('1', 'defined') | map(attribute='1')
+         | map('regex_replace', '/+$', '') | map('default', '/', true) | list }}
+
+# ── Logical volumes ──────────────────────────────────────────────────────────────────
+- name: Look up the volume groups
+  ansible.builtin.command: vgs --noheadings -o vg_name {{ item }}
+  loop: "{{ storage_lvs | map(attribute='vg') | unique }}"
+  register: _storage_vgs
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert the volume groups exist
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >-
+      volume group '{{ item.item }}' does not exist. This role only carves logical volumes
+      out of an existing VG; create the PV/VG yourself (vgcreate) — that touches whole disks.
+    quiet: true
+  loop: "{{ _storage_vgs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# lvcreate only takes free extents, so it cannot touch existing data. --wipesignatures
+# clears stale signatures a previously deleted LV left on those extents, which is what
+# makes the new volume genuinely empty for the blkid check below.
+- name: Create the logical volumes
+  ansible.builtin.command:
+    argv:
+      - lvcreate
+      - --yes
+      - --wipesignatures
+      - "y"
+      - --name
+      - "{{ item.name }}"
+      - "{{ '--extents' if '%' in (item.size | string) else '--size' }}"
+      - "{{ item.size }}"
+      - "{{ item.vg }}"
+    creates: "/dev/{{ item.vg }}/{{ item.name }}"
+  loop: "{{ storage_lvs }}"
+  loop_control:
+    label: "{{ item.vg }}/{{ item.name }} ({{ item.size }})"
+
+# `blkid -p` probes the device itself (no cache): exit 2 means no signature of any kind.
+# Only then, and only for LVs that declare `fs`, is a file system created — and never with
+# a force flag, so mkfs itself refuses if anything appeared in between.
+- name: Probe the logical volumes for an existing signature
+  ansible.builtin.command: blkid -p -o value -s TYPE /dev/{{ item.vg }}/{{ item.name }}
+  loop: "{{ storage_lvs | selectattr('fs', 'defined') }}"
+  loop_control:
+    label: "{{ item.vg }}/{{ item.name }}"
+  register: _storage_blkid
+  changed_when: false
+  failed_when: _storage_blkid.rc not in [0, 2]
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Create file systems on empty logical volumes
+  ansible.builtin.command: mkfs -t {{ item.item.fs }} /dev/{{ item.item.vg }}/{{ item.item.name }}
+  loop: "{{ _storage_blkid.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 2) }}"
+  loop_control:
+    label: "{{ item.item.vg }}/{{ item.item.name }} → {{ item.item.fs }}"
+  changed_when: true
+
+- name: Report logical volumes that already carry a different signature
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.vg }}/{{ item.item.name }} already holds '{{ item.stdout | trim }}', not
+      '{{ item.item.fs }}' — left untouched. Fix the inventory or the volume by hand.
+  loop: "{{ _storage_blkid.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) }}"
+  loop_control:
+    label: "{{ item.item.vg }}/{{ item.item.name }}"
+  when: item.stdout | trim != item.item.fs
+
+# ── Mount units ──────────────────────────────────────────────────────────────────────
+- name: Write the mount units
   ansible.builtin.include_tasks: render.yml
+
+- name: Let systemd read the new units  # noqa: no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _storage_units is changed
+
+# For a mount unit, "reload" is a remount: new options apply without unmounting (busy file
+# systems stay up). A changed What= or Type= only applies after an unmount — see README.
+- name: Mount and enable
+  ansible.builtin.systemd_service:
+    name: "{{ item.item.unit }}"
+    enabled: true
+    state: "{{ 'reloaded' if item is changed else 'started' }}"
+  loop: "{{ _storage_units.results }}"
+  loop_control:
+    label: "{{ item.item.where }}"
+  when: not ansible_check_mode
+
+- name: Ownership and mode of the mounted file systems
+  ansible.builtin.file:
+    path: "{{ item.where }}"
+    state: directory
+    owner: "{{ item.owner | default(omit) }}"
+    group: "{{ item.group | default(omit) }}"
+    mode: "{{ item.mode | default(omit) }}"
+  loop: "{{ _storage_mounts }}"
+  loop_control:
+    label: "{{ item.where }}"
+  when:
+    - not ansible_check_mode
+    - item.owner is defined or item.group is defined or item.mode is defined
+
+- name: Read what is mounted
+  ansible.builtin.command: findmnt -no SOURCE,FSTYPE,SIZE,USE% {{ item.where }}
+  loop: "{{ _storage_mounts }}"
+  loop_control:
+    label: "{{ item.where }}"
+  register: _storage_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Show the mounts
+  ansible.builtin.debug:
+    msg: "{{ _storage_findmnt.results | map(attribute='item.where') | zip(_storage_findmnt.results | map(attribute='stdout'))
+             | map('join', '  ') | list }}"
+  when: _storage_mounts | length > 0

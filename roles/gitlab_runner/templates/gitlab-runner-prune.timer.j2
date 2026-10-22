@@ -1,0 +1,12 @@
+# Managed by onebox (roles/gitlab_runner) — edits are overwritten on the next converge.
+[Unit]
+Description=Prune the GitLab Runner's rootless podman storage on a schedule
+
+[Timer]
+OnCalendar={{ gitlab_runner_prune_schedule }}
+# Catch up after the host was off at the scheduled time.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

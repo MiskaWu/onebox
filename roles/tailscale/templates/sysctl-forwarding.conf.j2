@@ -1,0 +1,5 @@
+# Managed by onebox (roles/tailscale) — edits are overwritten on the next converge.
+# Packet forwarding, needed because this node routes for the tailnet: it advertises routes
+# other than its own address{{ ' or acts as an exit node' if tailscale_advertise_exit_node else '' }}.
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1

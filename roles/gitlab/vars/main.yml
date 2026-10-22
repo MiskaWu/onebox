@@ -1,0 +1,27 @@
+---
+# One backslash, spelled by YAML (used to escape Ruby strings in gitlab.rb): Jinja string
+# literals treat backslashes differently across ansible-core versions.
+_gitlab_bs: "\\"
+
+_gitlab_image_ref: >-
+  {{ gitlab_image }}:{{ gitlab_version }}{{ ('@' ~ gitlab_image_digest) if gitlab_image_digest | length > 0 else '' }}
+
+# Secrets never go into gitlab.rb (which stays reviewable with --diff): each one is a
+# root-only file in config/onebox-secrets/, read by gitlab.rb with File.read. File name in
+# that directory → inventory variable holding the value.
+_gitlab_smtp_auth: "{{ gitlab_smtp_enabled | bool and gitlab_smtp_authentication | length > 0 }}"
+_gitlab_secret_files: >-
+  {{ {'root-password': 'gitlab_root_password'}
+     | combine({'oidc-client-id': 'gitlab_oidc_client_id', 'oidc-client-secret': 'gitlab_oidc_client_secret'}
+               if gitlab_oidc_enabled | bool else {})
+     | combine({'smtp-user': 'gitlab_smtp_user', 'smtp-password': 'gitlab_smtp_password'}
+               if _gitlab_smtp_auth | bool else {}) }}
+# Every name the role may write; the ones not needed any more are removed.
+_gitlab_known_secret_files: [root-password, oidc-client-id, oidc-client-secret, smtp-user, smtp-password]
+_gitlab_secrets_dir: "{{ gitlab_data_root }}/config/onebox-secrets"
+
+_gitlab_oidc_redirect_uri: "{{ onebox_oidc_clients.gitlab.redirect_uris | first }}"
+
+# Mount points the unit must not start without (deduplicated, empty entries dropped).
+_gitlab_unit_mounts: >-
+  {{ ([gitlab_data_root, gitlab_shared_dir, gitlab_backup_dir] + gitlab_required_mounts) | select | unique }}

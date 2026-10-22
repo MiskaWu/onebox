@@ -75,24 +75,6 @@
       {%- endfor -%}
       {{ out | to_json }}
 
-# Pods reach the OIDC issuer, OpenBao and Git through the edge, which keeps the pod address as
-# the client address; internal-only vhosts answer 403 unless the pod network counts as LAN
-# (ADR 0006, ADR 0017). The symptom without it is far from the cause: "token exchange failed",
-# "permission denied" from External Secrets, a repository Argo CD cannot fetch.
-- name: Assert the edge trusts the pod network
-  ansible.builtin.assert:
-    that:
-      - k3s_cluster_cidr in onebox_lan_cidrs
-    fail_msg: >-
-      add k3s_cluster_cidr ({{ k3s_cluster_cidr }}) to onebox_lan_cidrs: in-cluster clients of
-      internal-only vhosts (External Secrets → OpenBao, Argo CD → OIDC issuer and Git) are refused
-      with 403 otherwise. If no pod may reach internal-only vhosts, set k3s_pods_trusted_by_edge: false.
-    quiet: true
-  when:
-    - k3s_pods_trusted_by_edge | bool
-    - "'edge' in onebox_components"
-    - edge_internal_only_default | bool
-
 # kube-proxy DNATs NodePorts on every local address, 127.0.0.1 included: a NodePort equal to
 # the gateway's loopback port would silently take over the edge's traffic.
 - name: Assert the gateway port is outside the NodePort range

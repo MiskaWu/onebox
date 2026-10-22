@@ -1,0 +1,13 @@
+---
+# Same handler as roles/common's; handlers are play-scoped and tailscale runs in its own play.
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  changed_when: true
+  when: not onebox_render_only | bool
+
+- name: Apply sysctl forwarding
+  ansible.builtin.command: sysctl --load /etc/sysctl.d/90-onebox-tailscale.conf
+  changed_when: true
+  when:
+    - not onebox_render_only | bool
+    - _tailscale_forwarding | bool

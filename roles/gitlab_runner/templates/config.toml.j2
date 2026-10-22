@@ -1,0 +1,28 @@
+# Managed by onebox (roles/gitlab_runner) — overwritten on every converge. Contains the
+# runner's authentication token: root-only. The runner reloads this file by itself within
+# seconds of a change (no restart, running jobs are not interrupted).
+#
+# Not in here, by design of the current GitLab registration flow: tags, "run untagged
+# jobs", protected/locked and the description are set where the runner is created in
+# GitLab (Admin → CI/CD → Runners). See README "Creating the runner".
+
+concurrent = {{ gitlab_runner_concurrent | int }}
+check_interval = {{ gitlab_runner_check_interval | int }}
+log_level = {{ gitlab_runner_log_level | to_json }}
+
+[[runners]]
+  name = {{ gitlab_runner_name | to_json }}
+  url = {{ gitlab_runner_url | to_json }}
+  # Authentication token from the new registration flow (created in GitLab, "glrt-…").
+  # Create the runner without an expiry date: a rotated token would be written back to
+  # this file by the runner and overwritten by the next converge.
+  token = {{ gitlab_runner_token | to_json }}
+{% if gitlab_runner_tls_ca_file | length > 0 %}
+  tls-ca-file = {{ gitlab_runner_tls_ca_file | to_json }}
+{% endif %}
+  executor = "shell"
+  shell = "bash"
+  request_concurrency = {{ gitlab_runner_request_concurrency | int }}
+  # Jobs run through `su` from a system service, not a login session, so nothing sets the
+  # runtime directory rootless podman needs. Linger keeps /run/user/<uid> alive.
+  environment = ["XDG_RUNTIME_DIR=/run/user/{{ _gitlab_runner_uid }}"]

@@ -1,3 +1,53 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Shape checks only (nothing here is secret). Runtime facts — does the VG exist, is the
+# disk there — are checked in main.yml, where the host can answer.
+
+- name: Assert every mount has what and where
+  ansible.builtin.assert:
+    that:
+      - item.what is defined
+      - item.what | string | length > 0
+      - item.where is defined
+    fail_msg: "storage_mounts entries need `what` (UUID=…, /dev/…, host:/export) and `where` (got {{ item }})"
+    quiet: true
+  loop: "{{ storage_mounts }}"
+
+- name: Assert every logical volume has vg, name and size
+  ansible.builtin.assert:
+    that:
+      - item.vg is defined and item.vg is match('^[A-Za-z0-9+_.][A-Za-z0-9+_.-]*$')
+      - item.name is defined and item.name is match('^[A-Za-z0-9+_.][A-Za-z0-9+_.-]*$')
+      - item.size is defined and (item.size | string) is match('^([0-9]+([.][0-9]+)?[bBsSkKmMgGtTpPeE]?|[0-9]+%(FREE|VG|PVS))$')
+      - item.fs is not defined or item.fs in ['xfs', 'ext4']
+    fail_msg: >-
+      storage_lvs entry {{ item }} is invalid: needs vg and name (LVM name characters only),
+      size like 100G or 20%FREE, and fs (if set) xfs or ext4
+    quiet: true
+  loop: "{{ storage_lvs }}"
+  loop_control:
+    label: "{{ item.vg | default('?') }}/{{ item.name | default('?') }}"
+
+# The unit name is derived from the path; restricting the character set keeps that
+# derivation exact (README: unit names). System directories are refused outright: mounting
+# over them on a running host hides what the OS is using.
+- name: Assert every mount point is a plain absolute path outside the OS tree
+  ansible.builtin.assert:
+    that:
+      - item.where is match('^(/[A-Za-z0-9_][A-Za-z0-9_.-]*)+$')
+      - item.where not in ['/boot', '/dev', '/etc', '/proc', '/run', '/sys', '/tmp', '/usr', '/var', '/var/lib']
+    fail_msg: >-
+      mount point '{{ item.where }}' must be an absolute path of [A-Za-z0-9_.-] components
+      (no trailing slash, no component starting with '.' or '-') and not an OS directory
+    quiet: true
+  loop: "{{ _storage_mounts }}"
+  loop_control:
+    label: "{{ item.where }}"
+
+- name: Assert mount points and logical volumes are unique
+  ansible.builtin.assert:
+    that:
+      - _storage_mounts | map(attribute='where') | unique | length == _storage_mounts | length
+      - storage_lvs | map(attribute='vg') | zip(storage_lvs | map(attribute='name')) | map('join', '/') | unique | length
+        == storage_lvs | length
+    fail_msg: "storage_mounts/storage_lvs declare the same mount point or the same logical volume twice"
+    quiet: true

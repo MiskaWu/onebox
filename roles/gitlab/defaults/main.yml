@@ -1,2 +1,138 @@
 ---
-gitlab_vhost_entries: []
+# GitLab CE (omnibus image) as a rootful Quadlet container with its own unit template: it
+# needs more than the generic podman_quadlet offers (shared memory, nested volumes, mount
+# dependencies, an optional public SSH port, long start-up). It brings its own PostgreSQL
+# and Redis — the most exercised configuration of GitLab — and does not use `datastores`.
+
+# ── Image ────────────────────────────────────────────────────────────────────────────
+# Pinned by tag and digest. Upgrading runs database migrations and cannot be undone: back
+# up first (README "Upgrades"), and follow GitLab's required upgrade stops (x.2, x.5, x.8,
+# x.11) — the upgrade path tool lists them.
+gitlab_image: docker.io/gitlab/gitlab-ce
+gitlab_version: "19.5.1-ce.0"
+gitlab_image_digest: sha256:bb79dc86267c557fd11e7feb0cd9dd506dd02e991ecdd6cae11ca7d7e5d36fc3
+
+# ── Storage ──────────────────────────────────────────────────────────────────────────
+# Hot data (repositories, the bundled PostgreSQL, uploads) lives in <root>/data; config and
+# logs next to it. Give it a volume of its own (roles/storage) so GitLab filling up cannot
+# take the OS and every other service down with it.
+gitlab_data_root: /srv/gitlab
+# Optional host directories mounted *inside* the data volume — big, cold blobs and backups
+# can then live on other disks without changing any GitLab path setting:
+#   shared: LFS objects, CI artifacts, packages, registry blobs (gitlab-rails/shared)
+#   backup: backup archives (gitlab-backup) and configuration backups
+# Empty = they stay inside gitlab_data_root. LFS stays on the file system on purpose
+# (README "LFS and object storage").
+gitlab_shared_dir: ""
+gitlab_backup_dir: ""
+# Paths that must be mount points before GitLab may start (e.g. [/srv/gitlab]). Checked at
+# deploy time; at boot the unit's RequiresMountsFor= keeps GitLab down if they are missing,
+# so it never writes into the empty directory under a mount that failed.
+gitlab_required_mounts: []
+
+# ── HTTP (behind the edge) ───────────────────────────────────────────────────────────
+# The bundled nginx listens on this port inside the container, published on 127.0.0.1 only.
+gitlab_http_port: 8081
+# Sources whose X-Forwarded-For GitLab believes: loopback and the default podman network
+# (connections to a published port arrive from the bridge gateway).
+gitlab_trusted_proxies: [127.0.0.0/8, 10.88.0.0/16]
+
+# ── Container registry ───────────────────────────────────────────────────────────────
+# The registry on its own hostname (gitlab_registry_hostname): CI pushes images there and
+# the cluster pulls them — the link between CI and GitOps. Second vhost entry below.
+gitlab_registry_enabled: true
+gitlab_registry_port: 5050
+
+gitlab_vhost_entries: >-
+  {{ [{'hostname': gitlab_hostname,
+       'upstream': '127.0.0.1:' ~ gitlab_http_port,
+       'title': 'GitLab',
+       'description': 'Git forge and CI',
+       'lb_try_duration': '30s',
+       'stream_close_delay': '5m'}]
+     + ([{'hostname': gitlab_registry_hostname,
+          'upstream': '127.0.0.1:' ~ gitlab_registry_port,
+          'title': 'Container registry',
+          'description': 'Images built by CI',
+          'portal': false,
+          'lb_try_duration': '30s'}] if gitlab_registry_enabled | bool else []) }}
+
+# ── Git over SSH ─────────────────────────────────────────────────────────────────────
+# SSH has no SNI: the server cannot tell which host a client wants before the handshake,
+# so no proxy can share port 22 of one address between the host's sshd and GitLab. With
+# this on, GitLab takes port 22 on gitlab_ssh_bind_address and the admin sshd must have moved
+# (common_admin_ssh_port ≠ 22; asserted). Off = clone over HTTPS only. A published port is
+# DNAT: host firewall rules on INPUT do not filter it.
+gitlab_ssh_enabled: false
+gitlab_ssh_port: 22
+gitlab_ssh_bind_address: "{{ onebox_host_ip }}"
+
+# ── Sign-in ──────────────────────────────────────────────────────────────────────────
+# OpenID Connect against onebox_oidc_issuer (Casdoor, or any OIDC provider). Client ID and
+# secret: gitlab_oidc_client_id / gitlab_oidc_client_secret in secrets.yml; the redirect URI
+# comes from onebox_oidc_clients.gitlab.
+gitlab_oidc_enabled: "{{ onebox_oidc_issuer | length > 0 }}"
+gitlab_oidc_label: Single sign-on
+# Send the sign-in page straight to the provider. Password sign-in still exists for
+# break-glass: /users/sign_in?auto_sign_in=false.
+gitlab_oidc_auto_sign_in: false
+# New SSO users wait for an admin to approve them. Set false only when the provider admits
+# nobody but your organisation (Google or Entra ID multi-tenant would admit anyone).
+gitlab_oidc_block_auto_created_users: true
+# "query" = client secret in the request body (client_secret_post): accepted by Casdoor,
+# Keycloak, Entra ID and Google alike. "basic" = HTTP basic auth.
+gitlab_oidc_client_auth_method: query
+gitlab_oidc_scopes: [openid, profile, email]
+
+# Host paths of CA certificates GitLab must trust for outgoing TLS (the OIDC issuer, webhooks):
+# needed when the edge uses its internal CA (README "Private CAs"). Copied into
+# /etc/gitlab/trusted-certs on each converge.
+gitlab_trusted_ca_files: []
+
+# ── Mail ─────────────────────────────────────────────────────────────────────────────
+# Without SMTP the omnibus default is sendmail — and the image contains no MTA, so every
+# mail (password resets, invitations, exports) fails silently in Sidekiq. Off therefore
+# means mail is disabled outright (gitlab_email_enabled = false), not silently lost.
+gitlab_smtp_enabled: false
+gitlab_smtp_host: smtp.example.com
+gitlab_smtp_port: 587
+# starttls (587: plain connect, then upgrade) | tls (465: TLS from the first byte) | none.
+# The two TLS styles are mutually exclusive; the wrong one hangs instead of failing.
+gitlab_smtp_tls: starttls
+# login | plain | "" (relay without authentication). With authentication the credentials
+# are gitlab_smtp_user / gitlab_smtp_password in secrets.yml.
+gitlab_smtp_authentication: login
+gitlab_smtp_domain: "{{ onebox_domain }}"   # HELO name
+# The relay must accept this sender (verified domain, SPF/DKIM — README "Mail").
+gitlab_email_from: "gitlab@{{ onebox_domain }}"
+gitlab_email_reply_to: "noreply@{{ onebox_domain }}"
+gitlab_email_display_name: GitLab
+
+# ── Resources (shared host) ──────────────────────────────────────────────────────────
+# Defaults are sized for a host that also runs databases and k3s, following GitLab's
+# memory-constrained guidance. puma 0 = single process (saves 100–400 MB, fewer requests in
+# parallel).
+gitlab_shm_size: 256m              # Docker/Podman's 64 MB default is too small for GitLab
+gitlab_puma_workers: 2
+gitlab_sidekiq_concurrency: 10
+gitlab_bundled_monitoring: false   # Prometheus, Alertmanager and exporters (~300 MB)
+gitlab_kas_enabled: false          # agent for Kubernetes; GitOps here is Argo CD
+gitlab_malloc_conf: "dirty_decay_ms:1000,muzzy_decay_ms:1000"   # return freed memory sooner; "" = jemalloc default
+gitlab_time_zone: UTC
+# Seconds GitLab gets to stop cleanly (PostgreSQL!) before podman kills it.
+gitlab_stop_timeout: 120
+# Seconds to wait for GitLab to answer after (re)starting. The first start initialises the
+# database and takes several minutes.
+gitlab_start_timeout: 900
+# Raw Ruby appended to gitlab.rb, for settings without a variable of their own.
+gitlab_rb_extra: ""
+
+# ── Backups ──────────────────────────────────────────────────────────────────────────
+# `systemctl start gitlab-backup` (make target, README) writes a data archive and a config
+# archive (gitlab.rb, gitlab-secrets.json — not in the data archive, and without them a
+# restore cannot decrypt anything). Archives older than this many seconds are pruned (0 = keep all).
+gitlab_backup_keep_time: 604800
+# systemd OnCalendar for scheduled backups, e.g. "*-*-* 02:30:00". Empty = manual only.
+gitlab_backup_schedule: ""
+# Parts to leave out of the data archive, e.g. [registry, artifacts] (see gitlab-backup docs).
+gitlab_backup_skip: []

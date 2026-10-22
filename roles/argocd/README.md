@@ -69,7 +69,7 @@ break-glass path and needs no SSO.
 With `edge_tls_mode: internal` (or a private CA in `files` mode) set `argocd_ca_file` (default
 `onebox_edge_ca_file`): it becomes the OIDC `rootCA` and the TLS certificate for every Git host
 of the tenant repositories and credential templates. Pods reach the issuer and Git through the
-edge, so the pod CIDR must be in `onebox_lan_cidrs` (roles/k3s checks it).
+edge; the pod CIDR is admitted through `onebox_internal_cidrs` (see roles/k3s).
 
 ## RBAC
 

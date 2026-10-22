@@ -1,0 +1,9 @@
+---
+# The emulator packages drop binfmt.d files; systemd-binfmt registers them with the kernel.
+- name: Restart systemd-binfmt
+  ansible.builtin.systemd_service:
+    name: systemd-binfmt.service
+    state: restarted
+  when:
+    - not onebox_render_only | bool
+    - gitlab_runner_binfmt_enabled | bool

@@ -95,7 +95,7 @@ casdoor_vhost_entries:
     upstream: "127.0.0.1:{{ casdoor_http_port }}"
     title: Casdoor
     description: Single sign-on
-    allow_cidrs: "{{ (onebox_lan_cidrs + casdoor_internal_client_cidrs) | unique }}"
+    allow_cidrs: "{{ (onebox_internal_cidrs + casdoor_internal_client_cidrs) | unique }}"
     lb_try_duration: 10s
 
 # Notify=healthy needs podman >= 5.0 (Ubuntu 24.04 ships 4.9). auto = from `podman --version`.

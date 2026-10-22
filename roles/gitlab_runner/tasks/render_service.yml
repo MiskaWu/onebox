@@ -1,0 +1,49 @@
+---
+- name: Runner configuration directory (root only, the token lives here)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _gitlab_runner_config_dir }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+
+- name: Runner configuration (config.toml)
+  ansible.builtin.template:
+    src: config.toml.j2
+    dest: "{{ onebox_root }}{{ _gitlab_runner_config_dir }}/config.toml"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"
+  no_log: true   # contains the runner authentication token
+
+- name: Systemd directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0755"
+  loop:
+    - /etc/systemd/system
+    - /etc/systemd/system/gitlab-runner.service.d
+
+- name: Drop-in for gitlab-runner.service (ExecStart, home mount)
+  ansible.builtin.template:
+    src: service-override.conf.j2
+    dest: "{{ onebox_root }}/etc/systemd/system/gitlab-runner.service.d/10-onebox.conf"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _gitlab_runner_dropin
+
+- name: Prune service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ onebox_root }}/etc/systemd/system/{{ item }}"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  loop:
+    - gitlab-runner-prune.service
+    - gitlab-runner-prune.timer
+  register: _gitlab_runner_prune_units

@@ -1,4 +1,238 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Guards → files → image → (re)start or reconfigure → wait until GitLab answers.
+
+# ── Guards that need the host ────────────────────────────────────────────────────────
+- name: Check the required mount points
+  ansible.builtin.command: mountpoint -q {{ item }}
+  loop: "{{ gitlab_required_mounts }}"
+  register: _gitlab_mounts
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert the required volumes are mounted
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >-
+      {{ item.item }} is not mounted (gitlab_required_mounts). Mount it first (make storage).
+      If GitLab data already sits in that directory on the root file system, move it onto the
+      volume before converging — README "Moving the data to its own volume".
+    quiet: true
+  loop: "{{ _gitlab_mounts.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# The dual-port phase of roles/common keeps sshd on 22 while you are connected there; the
+# container cannot bind 22 until that phase is finished.
+- name: Look for sshd on the git-over-SSH port
+  ansible.builtin.shell:
+    cmd: set -o pipefail; ss -Hltnp sport = :{{ gitlab_ssh_port }} | grep -c '"sshd' || true
+    executable: /bin/bash
+  register: _gitlab_ssh_holder
+  changed_when: false
+  check_mode: false
+  when: gitlab_ssh_enabled | bool
+
+- name: Assert sshd has released the git-over-SSH port
+  ansible.builtin.assert:
+    that:
+      - _gitlab_ssh_holder.stdout | trim | int == 0
+    fail_msg: >-
+      sshd still listens on port {{ gitlab_ssh_port }}. The admin port move is not finished:
+      open a session on port {{ common_admin_ssh_port }}, keep it open, run
+      `make common` again from it, then `make gitlab`.
+    quiet: true
+  when:
+    - gitlab_ssh_enabled | bool
+    - not ansible_check_mode
+
+# A nested mount hides what was already in the directory it covers. Pointing
+# gitlab_shared_dir at a new, empty disk while LFS objects and artifacts still sit in the
+# data volume would make all of them vanish from GitLab's view — refuse, and say how to move them.
+- name: Look for blobs that a new shared mount would hide
+  ansible.builtin.shell:
+    cmd: |
+      # prints 1 only when the shared dir is empty and the data volume still holds blobs
+      [ -z "$(find {{ gitlab_shared_dir }} -mindepth 1 -print -quit 2>/dev/null)" ] || { echo 0; exit 0; }
+      [ -n "$(find {{ gitlab_data_root }}/data/gitlab-rails/shared -type f -print -quit 2>/dev/null)" ] && echo 1 || echo 0
+    executable: /bin/bash
+  register: _gitlab_shadowed
+  changed_when: false
+  check_mode: false
+  when: gitlab_shared_dir | length > 0
+
+- name: Assert no data would be hidden by the shared mount
+  ansible.builtin.assert:
+    that:
+      - _gitlab_shadowed.stdout | default('0') | trim | int == 0
+    fail_msg: >-
+      {{ gitlab_shared_dir }} is empty but {{ gitlab_data_root }}/data/gitlab-rails/shared holds
+      files (LFS, artifacts, …) that the new mount would hide. Stop GitLab and copy them first:
+      systemctl stop gitlab; cp -a {{ gitlab_data_root }}/data/gitlab-rails/shared/. {{ gitlab_shared_dir }}/
+    quiet: true
+  when: gitlab_shared_dir | length > 0
+
+# ── Files ────────────────────────────────────────────────────────────────────────────
+- name: Write configuration, secrets and units
   ansible.builtin.include_tasks: render.yml
+
+# Omnibus links everything in /etc/gitlab/trusted-certs into its CA store on reconfigure.
+- name: Trusted CA directory
+  ansible.builtin.file:
+    path: "{{ gitlab_data_root }}/config/trusted-certs"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: gitlab_trusted_ca_files | length > 0
+
+- name: Look for the CA certificates to trust
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ gitlab_trusted_ca_files }}"
+  register: _gitlab_ca_stat
+
+# Caddy creates its internal CA on its first start with internal TLS: deploy the edge first.
+- name: Assert the CA certificates exist
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: >-
+      {{ item.item }} (gitlab_trusted_ca_files) does not exist. For the edge's internal CA,
+      deploy the edge first (make edge) — Caddy creates the CA when it starts.
+    quiet: true
+  loop: "{{ _gitlab_ca_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not ansible_check_mode
+
+- name: CA certificates GitLab must trust
+  ansible.builtin.copy:
+    src: "{{ item.item }}"
+    dest: "{{ gitlab_data_root }}/config/trusted-certs/{{ item.item | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _gitlab_ca_stat.results | selectattr('stat.exists') }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: _gitlab_cas
+
+# ── Image ────────────────────────────────────────────────────────────────────────────
+# Pulled here rather than by the unit: the image is large, and a pull inside
+# `systemctl start` runs into the start timeout on a slow link.
+- name: Check whether the image is present
+  ansible.builtin.command: podman image exists {{ _gitlab_image_ref }}
+  register: _gitlab_image
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Pull the GitLab image
+  ansible.builtin.command: podman pull {{ _gitlab_image_ref }}
+  register: _gitlab_pull
+  changed_when: true
+  retries: 3
+  delay: 10
+  until: _gitlab_pull.rc == 0
+  when: _gitlab_image.rc != 0
+
+# ── Start, restart or reconfigure ────────────────────────────────────────────────────
+- name: Let Quadlet and systemd read the units  # noqa: no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: >-
+    _gitlab_unit is changed or _gitlab_backup_service is changed
+    or (_gitlab_backup_timer is defined and _gitlab_backup_timer is changed)
+
+- name: Read the service state
+  ansible.builtin.command: systemctl is-active gitlab.service
+  register: _gitlab_active
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Unit changed → restart (the image runs reconfigure on every start). Only configuration
+# changed → reconfigure inside the running container: same result, much shorter outage.
+- name: Decide how to apply the changes
+  ansible.builtin.set_fact:
+    _gitlab_action: >-
+      {{ 'start' if _gitlab_active.stdout | trim != 'active'
+         else 'restart' if (_gitlab_unit is changed or _gitlab_pull is changed)
+         else 'reconfigure' if (_gitlab_rb is changed or _gitlab_secrets is changed or _gitlab_cas is changed)
+         else 'none' }}
+
+- name: Start or restart GitLab
+  ansible.builtin.systemd_service:
+    name: gitlab.service
+    state: "{{ 'restarted' if _gitlab_action == 'restart' else 'started' }}"
+  when:
+    - _gitlab_action in ['start', 'restart']
+    - not ansible_check_mode
+
+- name: Apply the configuration (gitlab-ctl reconfigure)
+  ansible.builtin.command: podman exec gitlab gitlab-ctl reconfigure
+  changed_when: true
+  when:
+    - _gitlab_action == 'reconfigure'
+    - not ansible_check_mode
+
+# First start: database initialisation and migrations take minutes. nginx answers 502
+# until the application is up; with auto sign-in the page redirects (302) to the provider.
+- name: Wait until GitLab answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ gitlab_http_port }}/users/sign_in"
+    status_code: [200, 302]
+    follow_redirects: none
+    timeout: 10
+  register: _gitlab_ready
+  until: _gitlab_ready.status in [200, 302]
+  retries: "{{ (gitlab_start_timeout | int / 10) | round(0, 'ceil') | int }}"
+  delay: 10
+  when: not ansible_check_mode
+
+# ── Backups ──────────────────────────────────────────────────────────────────────────
+- name: Scheduled backups
+  ansible.builtin.systemd_service:
+    name: gitlab-backup.timer
+    enabled: true
+    state: started
+  when:
+    - gitlab_backup_schedule | length > 0
+    - not ansible_check_mode
+
+- name: Look for a backup timer from an earlier schedule
+  ansible.builtin.stat:
+    path: /etc/systemd/system/gitlab-backup.timer
+  register: _gitlab_old_timer
+  when: gitlab_backup_schedule | length == 0
+
+- name: Stop the backup timer (gitlab_backup_schedule is empty)
+  ansible.builtin.systemd_service:
+    name: gitlab-backup.timer
+    enabled: false
+    state: stopped
+  when:
+    - gitlab_backup_schedule | length == 0
+    - _gitlab_old_timer.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Remove the unused backup timer
+  ansible.builtin.file:
+    path: /etc/systemd/system/gitlab-backup.timer
+    state: absent
+  when:
+    - gitlab_backup_schedule | length == 0
+    - _gitlab_old_timer.stat.exists | default(false)
+
+- name: Show how to reach GitLab
+  ansible.builtin.debug:
+    msg:
+      - "https://{{ gitlab_hostname }} — user root; the initial password is gitlab_root_password (used only on the first start)."
+      - "{{ ('Git over SSH: git@' ~ gitlab_hostname ~ ':<group>/<project>.git') if gitlab_ssh_enabled | bool
+            else 'Git over SSH is off: clone over HTTPS.' }}"
+      - "{{ ('Registry: ' ~ gitlab_registry_hostname) if gitlab_registry_enabled | bool else 'Registry: off' }}"
+      - "{{ 'Sign-in: ' ~ (('OIDC via ' ~ onebox_oidc_issuer) if gitlab_oidc_enabled | bool else 'local accounts only') }}"
+      - "Mail: {{ ('via ' ~ gitlab_smtp_host ~ ' — send a test with the README command') if gitlab_smtp_enabled | bool else 'disabled' }}"

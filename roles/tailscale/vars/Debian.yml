@@ -1,0 +1,11 @@
+---
+# Debian 13+ / Ubuntu 24.04+
+_tailscale_package: "tailscale={{ tailscale_version }}"
+_tailscale_repo_file: /etc/apt/sources.list.d/onebox-tailscale.sources
+_tailscale_key_file: /etc/apt/keyrings/onebox-tailscale.asc
+_tailscale_key_url: "{{ tailscale_repo_url }}/{{ tailscale_repo_distro }}/{{ tailscale_repo_codename }}.asc"
+# The upstream install script writes this one-line source with another Signed-By path; apt
+# refuses two definitions of one repository with different keys ("Conflicting values set
+# for option Signed-By"), so it has to go.
+_tailscale_foreign_repo_files:
+  - /etc/apt/sources.list.d/tailscale.list

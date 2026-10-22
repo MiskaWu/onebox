@@ -1,0 +1,118 @@
+---
+# Remove Tailscale from this host, cleanly. Run through playbooks/tailscale-uninstall.yml:
+# without -e tailscale_uninstall_confirm=true it only prints what it would do.
+#
+# The two things a hand-made removal forgets:
+#   - `tailscale logout` — otherwise the admin console keeps a ghost machine whose node key
+#     is still trusted and which still counts against the device quota;
+#   - /var/lib/tailscale — otherwise a reinstall comes back with the old node identity.
+
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+- name: Check for the tailscale binary
+  ansible.builtin.stat:
+    path: /usr/bin/tailscale
+  register: _tailscale_un_bin
+
+- name: Read the tailnet address
+  ansible.builtin.command: tailscale ip -4
+  register: _tailscale_un_ip
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: _tailscale_un_bin.stat.exists
+
+- name: Read the firewalld zone of tailscale0
+  ansible.builtin.command: firewall-cmd --permanent --get-zone-of-interface=tailscale0
+  register: _tailscale_un_zone
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: common_firewall_backend == 'firewalld'
+
+# Removing Tailscale while connected through it cuts the session halfway and can leave the
+# package gone but the firewall binding in place. Established SSH sessions whose peer is
+# in 100.64.0.0/10 (the tailnet's CGNAT range) are the tell.
+- name: Look for SSH sessions that arrive through the tailnet
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      ss -Htn state established '( sport = :{{ common_admin_ssh_port }} )'
+      | awk '{print $4}' | grep -cE '^(\[::ffff:)?100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' || true
+    executable: /bin/bash
+  register: _tailscale_un_selfcut
+  changed_when: false
+  check_mode: false
+
+- name: Show what would be removed
+  ansible.builtin.debug:
+    msg:
+      - "tailscale binary          : {{ 'installed' if _tailscale_un_bin.stat.exists else 'not installed' }}"
+      - "tailnet address           : {{ _tailscale_un_ip.stdout | default('') | trim or '-' }}"
+      - "firewalld zone of tailscale0: {{ _tailscale_un_zone.stdout | default('') | trim or '-' }}"
+      - "Steps: tailscale logout → stop/disable tailscaled → remove package → remove repository and key"
+      - "       → remove /var/lib/tailscale (node identity) → unbind tailscale0 from firewalld"
+      - "{{ 'BLOCKED: you are connected through the tailnet; run this from the LAN or the console.'
+            if (_tailscale_un_selfcut.stdout | trim | int) > 0 else '' }}"
+      - "Afterwards, outside this host: remove tailscale from onebox_components, delete the machine in the"
+      - "admin console, drop tailscale_auth_key from secrets.yml, and remove 100.64.0.0/10 from the LAN CIDRs."
+
+- name: Stop here unless confirmed
+  ansible.builtin.meta: end_host
+  when: not tailscale_uninstall_confirm | default(false) | bool
+
+- name: Refuse to cut the session this runs through
+  ansible.builtin.assert:
+    that:
+      - (_tailscale_un_selfcut.stdout | trim | int) == 0
+    fail_msg: >-
+      An SSH session reaches this host through the tailnet (100.64.0.0/10). Removing Tailscale
+      now would cut it mid-way. Run the removal from the LAN or the console.
+    quiet: true
+
+- name: Log out of the tailnet
+  ansible.builtin.command: tailscale logout
+  register: _tailscale_un_logout
+  changed_when: _tailscale_un_logout.rc == 0
+  failed_when: false   # already logged out is fine
+  when: _tailscale_un_bin.stat.exists
+
+- name: Stop tailscaled
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    state: stopped
+    enabled: false
+  failed_when: false   # no unit is fine
+  when: _tailscale_un_bin.stat.exists
+
+- name: Remove the package
+  ansible.builtin.package:
+    name: tailscale
+    state: absent
+
+- name: Remove repository, key, node state and forwarding drop-in
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ _tailscale_repo_file }}"
+    - "{{ _tailscale_key_file }}"
+    - /var/lib/tailscale
+    - /etc/sysctl.d/90-onebox-tailscale.conf
+
+- name: Unbind tailscale0 from firewalld
+  ansible.builtin.command: >-
+    firewall-cmd --permanent --zone={{ _tailscale_un_zone.stdout | trim }} --remove-interface=tailscale0
+  changed_when: true
+  when:
+    - common_firewall_backend == 'firewalld'
+    - _tailscale_un_zone.rc | default(1) == 0
+    - _tailscale_un_zone.stdout | trim | length > 0
+
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  changed_when: true
+  when:
+    - common_firewall_backend == 'firewalld'
+    - _tailscale_un_zone.rc | default(1) == 0

@@ -1,0 +1,18 @@
+---
+# Remove Tailscale from the host (roles/tailscale/tasks/uninstall.yml).
+#
+#   ansible-playbook -i inventories/<env> playbooks/tailscale-uninstall.yml            preview only
+#   ansible-playbook -i inventories/<env> playbooks/tailscale-uninstall.yml \
+#       -e tailscale_uninstall_confirm=true                                            remove
+#
+# Not part of site.yml: nothing a normal converge does may take remote access away.
+- name: Remove Tailscale
+  hosts: onebox
+  become: true
+  gather_facts: true   # onebox_os_family comes from the facts
+  gather_subset: [min]
+  tasks:
+    - name: Preview or remove
+      ansible.builtin.include_role:
+        name: tailscale
+        tasks_from: uninstall.yml

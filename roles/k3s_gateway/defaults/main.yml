@@ -84,7 +84,7 @@ k3s_gateway_vhost_entries: >-
 #     port: 1883               #   (spec.entryPoints: [demo-mqtt]); a mismatch silently creates
 #                              #   no router. Lowercase, ≤15 characters (a container port name).
 #     bind_ip: 192.0.2.10      # default k3s_gateway_tcp_bind_ip; never 0.0.0.0 by accident
-#     allowed_cidrs: [...]     # firewalld sources, default onebox_lan_cidrs; [] = any source
+#     allowed_cidrs: [...]     # firewalld sources, default onebox_internal_cidrs; [] = any source
 # Without TLS a TCP router can only match HostSNI(`*`): one port serves exactly one backend.
 # These are host-native sockets (INPUT path), so firewalld really filters them (ADR 0007).
 # Adding or removing an entry recreates the Traefik pod: every connection drops for seconds.

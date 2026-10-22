@@ -1,0 +1,11 @@
+---
+# Debian 13+ / Ubuntu 24.04+
+_gitlab_runner_pkg_sep: "="
+_gitlab_runner_repo_file: /etc/apt/sources.list.d/onebox-gitlab-runner.sources
+# Left by the upstream install script with a different Signed-By path; apt rejects two
+# definitions of one repository with different keys.
+_gitlab_runner_foreign_repo_files:
+  - /etc/apt/sources.list.d/runner_gitlab-runner.list
+_gitlab_runner_key_dir: /etc/apt/keyrings
+# Statically linked emulators registered with the F (fix-binary) flag — see README.
+_gitlab_runner_binfmt_packages: [qemu-user-static]

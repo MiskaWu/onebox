@@ -1,3 +1,50 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Shape checks. Public keys are not secrets, so they may appear in loop labels and messages.
+
+- name: Assert each operator entry is well-formed
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.name is string
+      - item.name is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - item.name != 'root'
+      - item.state in ['present', 'absent']
+      - item.ssh_keys is sequence and item.ssh_keys is not string
+    fail_msg: >-
+      operators_admins entry {{ item.name | default(item) }} is invalid: name must be lowercase
+      [a-z_][a-z0-9_-]* (≤ 32 chars, not root — Linux names are case-sensitive and "Alice" would
+      quietly be another account), state present or absent, ssh_keys a list
+    quiet: true
+  loop: "{{ _operators_admins }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+# The classic paste mistakes: the private key, the file name, or a key wrapped over two lines.
+- name: Assert every key is a single-line public key
+  ansible.builtin.assert:
+    that:
+      - "'PRIVATE KEY' not in item.1"
+      - (item.1 | trim).split(' ')[0] in _operators_key_types
+      - (item.1 | trim).split(' ') | length >= 2
+      - (item.1 | trim).splitlines() | length == 1
+    fail_msg: >-
+      a key of {{ item.0.name }} is not a one-line OpenSSH public key (expected the whole line
+      of ~/.ssh/id_ed25519.pub: "ssh-ed25519 AAAA… comment"). If you pasted a private key,
+      treat it as leaked: generate a new pair.
+    quiet: true
+  loop: "{{ _operators_present | subelements('ssh_keys') }}"
+  loop_control:
+    label: "{{ item.0.name }}"
+
+- name: Assert names are unique and break-glass accounts are not operators
+  ansible.builtin.assert:
+    that:
+      - _operators_admins | map(attribute='name') | unique | length == _operators_admins | length
+      - _operators_present | map(attribute='name') | intersect(operators_console_only) | length == 0
+    fail_msg: >-
+      operators_admins lists a name twice, or an operator is also in operators_console_only
+      ({{ _operators_present | map(attribute='name') | intersect(operators_console_only) | join(', ') }}).
+      DenyUsers rejects console-only accounts before authentication — an operator listed there
+      is locked out of SSH, and with sudo asking for passwords there is no second way in.
+      An account is either a remote operator or a break-glass account, not both.
+    quiet: true

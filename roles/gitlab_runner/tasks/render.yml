@@ -1,3 +1,11 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Everything this role writes (tests/render.yml runs this file in render mode). main.yml
+# includes the three parts at the points where the host is ready for them.
+- name: Repository definition
+  ansible.builtin.include_tasks: render_repo.yml
+
+- name: Files in the runner's home
+  ansible.builtin.include_tasks: render_home.yml
+
+- name: Runner configuration and units
+  ansible.builtin.include_tasks: render_service.yml

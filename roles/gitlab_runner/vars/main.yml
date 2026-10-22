@@ -1,0 +1,36 @@
+---
+# Fixed by the package: its post-install script creates and wires up exactly this account.
+_gitlab_runner_user: gitlab-runner
+_gitlab_runner_config_dir: /etc/gitlab-runner
+
+_gitlab_runner_packages:
+  - "gitlab-runner{{ _gitlab_runner_pkg_sep }}{{ gitlab_runner_version }}"
+  - "gitlab-runner-helper-images{{ _gitlab_runner_pkg_sep }}{{ gitlab_runner_version }}"
+
+_gitlab_runner_repo_key_file: "{{ _gitlab_runner_key_dir }}/onebox-gitlab-packages.asc"
+_gitlab_runner_rpm_key_file: "{{ _gitlab_runner_key_dir }}/onebox-gitlab-runner-rpm.asc"
+
+# uid of the account: known once main.yml has created it. Render mode has no host to ask,
+# so it uses a placeholder there.
+_gitlab_runner_uid: "{{ _gitlab_runner_account.uid | default(990) }}"
+# Files in the runner's home belong to the runner (ownership is omitted in render mode).
+_gitlab_runner_owner: "{{ omit if onebox_render_only | bool else _gitlab_runner_user }}"
+_gitlab_runner_pasta_dir: "{{ gitlab_runner_home }}/.config/containers/containers.conf.d"
+
+# SELinux has file-context rules for rootless container storage only under /home/<user>.
+# A home elsewhere is declared equivalent to this path so it gets the same labels.
+_gitlab_runner_selinux_equiv: "/home/{{ _gitlab_runner_user }}"
+
+# IPv4 CIDRs from gitlab_runner_pasta_avoid_cidrs that contain the pasta address.
+_gitlab_runner_pasta_conflicts: |
+  {% set a = gitlab_runner_pasta_address.split('.') | map('int') | list %}
+  {% set addr = a[0] * 16777216 + a[1] * 65536 + a[2] * 256 + a[3] %}
+  {% set out = [] %}
+  {% for cidr in gitlab_runner_pasta_avoid_cidrs if ':' not in cidr and '/' in cidr %}
+  {%   set n = cidr.split('/')[0].split('.') | map('int') | list %}
+  {%   set bits = cidr.split('/')[1] | int %}
+  {%   set size = 2 ** (32 - bits) %}
+  {%   set net = ((n[0] * 16777216 + n[1] * 65536 + n[2] * 256 + n[3]) // size) * size %}
+  {%   if net <= addr < net + size %}{% set _ = out.append(cidr) %}{% endif %}
+  {% endfor %}
+  {{ out }}

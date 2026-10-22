@@ -1,0 +1,15 @@
+# Managed by onebox (roles/operators) — edits are overwritten on the next converge.
+#
+# Keys of the operators declared in the inventory live in {{ operators_keys_dir }}/<user>
+# (written exclusively: removing a key from the inventory revokes it). Each user's own
+# ~/.ssh/authorized_keys stays in the list, so nothing that works today stops working.
+# sshd takes the FIRST value it reads for this keyword: no drop-in sorting before this
+# one may set it (the role checks the effective value with `sshd -T`).
+AuthorizedKeysFile .ssh/authorized_keys {{ operators_keys_dir }}/%u
+{% if operators_console_only | length > 0 %}
+
+# Break-glass accounts: console/tty login only. DenyUsers rejects them before
+# authentication, so even a key added later does not open network access; local logins do
+# not go through sshd and are unaffected.
+DenyUsers {{ operators_console_only | join(' ') }}
+{% endif %}

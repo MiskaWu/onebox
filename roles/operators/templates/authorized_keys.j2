@@ -1,0 +1,6 @@
+# Managed by onebox (roles/operators) for {{ item.name }} — overwritten on every converge.
+# Add or revoke keys in the inventory (operators_admins). Keys in ~/.ssh/authorized_keys
+# are the user's own and are not managed here.
+{% for key in item.ssh_keys | default([]) %}
+{{ key | trim }}
+{% endfor %}

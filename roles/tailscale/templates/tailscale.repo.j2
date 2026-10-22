@@ -1,0 +1,11 @@
+# Managed by onebox (roles/tailscale) — edits are overwritten on the next converge.
+# Official Tailscale repository. The key is imported (fingerprint-checked) by the role, so
+# gpgkey points at the local copy and dnf never fetches a key on its own.
+[tailscale-stable]
+name=Tailscale stable
+baseurl={{ tailscale_repo_url }}/rhel/{{ tailscale_repo_el_major }}/$basearch
+enabled=1
+type=rpm
+repo_gpgcheck=1
+gpgcheck=1
+gpgkey=file://{{ _tailscale_key_file }}

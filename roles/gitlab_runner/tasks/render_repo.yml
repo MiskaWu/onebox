@@ -1,0 +1,19 @@
+---
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+- name: Repository directory (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _gitlab_runner_repo_file | dirname }}"
+    state: directory
+    mode: "0755"
+  when: onebox_render_only | bool
+
+- name: GitLab Runner repository definition
+  ansible.builtin.template:
+    src: "{{ 'gitlab-runner.repo.j2' if onebox_os_family == 'RedHat' else 'gitlab-runner.sources.j2' }}"
+    dest: "{{ onebox_root }}{{ _gitlab_runner_repo_file }}"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _gitlab_runner_repo

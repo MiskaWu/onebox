@@ -1,0 +1,4 @@
+---
+# Rocky / AlmaLinux / RHEL 9+
+_operators_os_admin_group: wheel   # granted sudo by the stock /etc/sudoers; polkit admin
+_operators_sshd_service: sshd

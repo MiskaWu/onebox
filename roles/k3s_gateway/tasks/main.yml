@@ -136,7 +136,7 @@
   ansible.builtin.set_fact:
     _k3s_gateway_fw_rules: >-
       {{ _k3s_gateway_fw_rules | default([])
-         + [{'port': item.port, 'proto': 'tcp', 'sources': item.allowed_cidrs | default(onebox_lan_cidrs)}] }}
+         + [{'port': item.port, 'proto': 'tcp', 'sources': item.allowed_cidrs | default(onebox_internal_cidrs)}] }}
   loop: "{{ k3s_gateway_tcp_entrypoints }}"
   loop_control:
     label: "{{ item.name }}"

@@ -1,0 +1,29 @@
+# Managed by onebox (roles/storage) — edits are overwritten on the next converge.
+# {{ item.what }} → {{ item.where }}
+# The file name is the escaped mount path: systemd refuses a mount unit whose name does not
+# match Where=.
+[Unit]
+Description=onebox storage: {{ item.where }}
+Documentation=man:systemd.mount(5)
+{% if item.network %}
+# Network file system: wait for the network, and never block boot on the server.
+Wants=network-online.target
+After=network-online.target
+{% endif %}
+
+[Mount]
+What={{ item.device }}
+Where={{ item.where }}
+Type={{ item.type }}
+{% if 'nofail' in item.options.split(',') %}
+# `nofail` means the same as in fstab: wanted but not required by the boot target, and boot
+# is not ordered after it. A missing disk delays boot by the device timeout
+# (DefaultDeviceTimeoutSec, 90 s), then the mount fails on its own — and the services that
+# need it refuse to start (RequiresMountsFor=) instead of writing to the empty directory below.
+{% else %}
+# No `nofail`: if this mount fails, boot stops in emergency mode. Chosen in the inventory.
+{% endif %}
+Options={{ item.options }}
+
+[Install]
+WantedBy={{ 'remote-fs.target' if item.network else 'local-fs.target' }}

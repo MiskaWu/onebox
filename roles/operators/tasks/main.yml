@@ -1,4 +1,189 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Order matters: accounts and groups first, then the files that reference them, then a
+# check of what sshd actually ended up using.
+
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+# Who is running this converge: the remote user, or (connection: local under `sudo make`)
+# the person behind sudo. Removing or console-locking that account cuts the branch they
+# are sitting on.
+- name: Assert the operator running this converge does not lock themselves out
+  ansible.builtin.assert:
+    that:
+      - _operators_me | intersect(_operators_absent_names + operators_console_only) | length == 0
+    fail_msg: >-
+      {{ _operators_me | intersect(_operators_absent_names + operators_console_only) | join(', ') }}
+      is running this converge and would be removed or made console-only. Do that from another
+      operator's account.
+    quiet: true
+  vars:
+    _operators_me: >-
+      {{ [ansible_user | default(''), lookup('ansible.builtin.env', 'SUDO_USER'), lookup('ansible.builtin.env', 'USER')]
+         | select | reject('equalto', 'root') | unique | list }}
+
+- name: Operators group
+  ansible.builtin.group:
+    name: "{{ operators_group }}"
+    state: present
+
+- name: Look up the declared accounts
+  ansible.builtin.command: getent passwd {{ item.name }}
+  loop: "{{ _operators_admins }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _operators_passwd
+  changed_when: false
+  failed_when: _operators_passwd.rc not in [0, 2]
+  check_mode: false
+
+# Without a `password` argument useradd leaves the new password locked ("!"): key login
+# works (UsePAM), sudo does not until someone sets one — on purpose, a password must not
+# travel through Ansible (logs, temp files). Existing passwords are never touched.
+- name: Operator accounts and their groups
+  ansible.builtin.user:
+    name: "{{ item.item.name }}"
+    shell: "{{ item.item.shell | default('/bin/bash' if item.rc != 0 else omit) }}"
+    groups: ["{{ _operators_os_admin_group }}", "{{ operators_group }}"]
+    append: true
+    create_home: true
+    state: present
+  loop: "{{ _operators_passwd.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - item.item.state == 'present'
+    - operators_create_accounts | bool or item.rc == 0
+
+# The home directory stays: purging it (userdel -r) is a separate decision made later,
+# once nothing in it is needed (README "Offboarding").
+- name: Remove accounts declared absent
+  ansible.builtin.user:
+    name: "{{ item.item.name }}"
+    state: absent
+    remove: false
+  loop: "{{ _operators_passwd.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - item.item.state == 'absent'
+    - operators_create_accounts | bool
+    - item.rc == 0
+
+# ── Files: managed keys, sudo policy, sshd drop-in ───────────────────────────────────
+- name: Write keys, sudo policy and sshd drop-in
   ansible.builtin.include_tasks: render.yml
+
+# The keys directory is exclusive: a file for anyone no longer declared means a key nobody
+# reviews any more.
+- name: Find managed key files
+  ansible.builtin.find:
+    paths: "{{ operators_keys_dir }}"
+    file_type: file
+  register: _operators_key_files
+
+- name: Remove managed keys of people no longer declared
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _operators_key_files.files | rejectattr('path', 'in', _operators_present | map(attribute='name')
+            | map('regex_replace', '^', operators_keys_dir ~ '/') | list) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  notify: Reload sshd
+
+# ── Break-glass accounts ─────────────────────────────────────────────────────────────
+# Second lock next to DenyUsers: no key file for these accounts at all, so a lost or
+# overwritten drop-in does not quietly turn network access back on.
+- name: Look up the break-glass accounts
+  ansible.builtin.command: getent passwd {{ item }}
+  loop: "{{ operators_console_only }}"
+  register: _operators_console_passwd
+  changed_when: false
+  failed_when: _operators_console_passwd.rc not in [0, 2]
+  check_mode: false
+
+- name: Break-glass accounts keep no authorized_keys
+  ansible.builtin.file:
+    path: "{{ item.0.stdout.split(':')[5] }}/.ssh/{{ item.1 }}"
+    state: absent
+  loop: "{{ _operators_console_passwd.results | selectattr('rc', 'equalto', 0) | product(['authorized_keys', 'authorized_keys2']) }}"
+  loop_control:
+    label: "{{ item.0.item }}: {{ item.1 }}"
+
+# ── Prove sshd took it ───────────────────────────────────────────────────────────────
+- name: Check the complete sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  check_mode: false
+
+- name: Apply the sshd changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the effective sshd settings
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: _operators_sshd_effective
+  changed_when: false
+  check_mode: false
+
+# sshd keeps the first value it reads for AuthorizedKeysFile. A drop-in that sorts before
+# ours (cloud images ship some) would make the managed keys silently ignored.
+- name: Assert sshd reads the managed keys and denies the break-glass accounts
+  ansible.builtin.assert:
+    that:
+      - _operators_sshd_effective.stdout_lines | select('match', '^authorizedkeysfile .*' ~ (operators_keys_dir | regex_escape) ~ '/%u')
+        | list | length == 1
+      - operators_console_only | difference(_operators_denied) | length == 0
+    fail_msg: >-
+      sshd does not use the onebox drop-in as written: either another file sets
+      AuthorizedKeysFile first (look at `grep -ri authorizedkeysfile /etc/ssh/sshd_config
+      /etc/ssh/sshd_config.d/`) or DenyUsers misses {{ operators_console_only | difference(_operators_denied) | join(', ') }}.
+      Effective value: {{ _operators_sshd_effective.stdout_lines | select('match', '^(authorizedkeysfile|denyusers) ') | join(' | ') }}
+    quiet: true
+  vars:
+    _operators_denied: >-
+      {{ _operators_sshd_effective.stdout_lines | select('match', '^denyusers ')
+         | map('regex_replace', '^denyusers ', '') | map('split', ' ') | flatten | list }}
+  when: not ansible_check_mode
+
+# ── What is still left to a human ────────────────────────────────────────────────────
+- name: Read the password state of the operators
+  ansible.builtin.command: passwd -S {{ item.item.name }}
+  loop: "{{ _operators_passwd.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: _operators_pwstate
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - item.item.state == 'present'
+    - operators_create_accounts | bool or item.rc == 0
+
+- name: Report operators who cannot sudo yet
+  ansible.builtin.debug:
+    msg:
+      - "No usable password (they can log in with their key, but sudo asks for a password): {{ _operators_nopw | join(', ') }}"
+      - "Set a temporary one and force a change at first login: sudo passwd <name> && sudo chage -d 0 <name>"
+  vars:
+    _operators_nopw: >-
+      {{ _operators_pwstate.results | selectattr('stdout', 'defined')
+         | selectattr('stdout', 'match', '^[^ ]+ (L|LK|NP) ') | map(attribute='item.item.name') | list }}
+  when:
+    - not operators_sudo_nopasswd | bool
+    - _operators_nopw | length > 0
+
+- name: Report declared operators without an account
+  ansible.builtin.debug:
+    msg: >-
+      Skipped (no such account, operators_create_accounts is false):
+      {{ _operators_passwd.results | selectattr('rc', 'equalto', 2) | map(attribute='item.name') | join(', ') }}.
+      Names are case-sensitive — check the spelling against `getent passwd`.
+  when:
+    - not operators_create_accounts | bool
+    - _operators_passwd.results | selectattr('rc', 'equalto', 2) | selectattr('item.state', 'equalto', 'present') | list | length > 0
+
+# ── Shared checkout (optional) ───────────────────────────────────────────────────────
+- name: Shared checkout of this repository
+  ansible.builtin.include_tasks: repo.yml
+  when: operators_repo_dir | length > 0

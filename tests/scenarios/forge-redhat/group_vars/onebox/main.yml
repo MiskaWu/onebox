@@ -1,0 +1,22 @@
+---
+# forge components (operators, storage, tailscale, gitlab, gitlab-runner) on a RHEL-family
+# host with every optional branch switched on: firewalld, admin sshd moved off 22 so GitLab
+# takes git-over-SSH, an external OIDC provider (no Casdoor), SMTP with STARTTLS and auth,
+# registry, nested shared/backup volumes, scheduled backups.
+onebox_env: test
+onebox_os_family: RedHat
+onebox_domain: forge.example.test
+onebox_host_ip: 192.0.2.10
+onebox_lan_cidrs: [192.0.2.0/24, 100.64.0.0/10]
+onebox_components:
+  - edge
+  - operators
+  - storage
+  - tailscale
+  - gitlab
+  - gitlab-runner
+common_firewall_backend: firewalld
+common_admin_ssh_port: 2222
+edge_tls_mode: internal
+# Any OIDC provider will do; here a Keycloak-style realm URL.
+onebox_oidc_issuer: https://login.example.test/realms/onebox

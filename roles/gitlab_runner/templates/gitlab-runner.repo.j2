@@ -1,0 +1,13 @@
+# Managed by onebox (roles/gitlab_runner) — edits are overwritten on the next converge.
+# Official GitLab Runner repository. Both keys are local copies pinned by checksum and
+# fingerprint in the role defaults; dnf never fetches a key on its own.
+[runner_gitlab-runner]
+name=GitLab Runner
+baseurl={{ gitlab_runner_repo_url }}/el/{{ gitlab_runner_repo_el_major }}/$basearch
+enabled=1
+repo_gpgcheck=1
+gpgcheck=1
+gpgkey=file://{{ _gitlab_runner_repo_key_file }}
+       file://{{ _gitlab_runner_rpm_key_file }}
+sslverify=1
+metadata_expire=300

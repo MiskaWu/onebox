@@ -1,3 +1,43 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Files this role writes. Included by main.yml and by tests/render.yml (render mode).
+
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+- name: Repository and sysctl directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0755"
+  loop:
+    - "{{ _tailscale_repo_file | dirname }}"
+    - /etc/sysctl.d
+
+- name: Package repository definition
+  ansible.builtin.template:
+    src: "{{ 'tailscale.repo.j2' if onebox_os_family == 'RedHat' else 'tailscale.sources.j2' }}"
+    dest: "{{ onebox_root }}{{ _tailscale_repo_file }}"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _tailscale_repo
+
+- name: Packet forwarding (only when this node routes for others)
+  ansible.builtin.template:
+    src: sysctl-forwarding.conf.j2
+    dest: "{{ onebox_root }}/etc/sysctl.d/90-onebox-tailscale.conf"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  when: _tailscale_forwarding | bool
+  notify: Apply sysctl forwarding
+
+# Removing the file does not switch forwarding off until reboot — another component
+# (k3s) may rely on it, so the running value is left alone on purpose.
+- name: No forwarding drop-in when the node only advertises itself
+  ansible.builtin.file:
+    path: "{{ onebox_root }}/etc/sysctl.d/90-onebox-tailscale.conf"
+    state: absent
+  when: not _tailscale_forwarding | bool

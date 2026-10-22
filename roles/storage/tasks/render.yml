@@ -1,3 +1,21 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Files this role writes. Included by main.yml and by tests/render.yml (render mode).
+
+- name: Systemd unit directory (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}/etc/systemd/system"
+    state: directory
+    mode: "0755"
+  when: onebox_render_only | bool
+
+- name: Mount units
+  ansible.builtin.template:
+    src: storage.mount.j2
+    dest: "{{ onebox_root }}/etc/systemd/system/{{ item.unit }}"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  loop: "{{ _storage_mounts }}"
+  loop_control:
+    label: "{{ item.unit }} ← {{ item.what }}"
+  register: _storage_units

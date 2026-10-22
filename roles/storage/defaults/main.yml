@@ -1,1 +1,37 @@
 ---
+# ── Mounts ───────────────────────────────────────────────────────────────────────────
+# Filesystems to mount, each as its own systemd .mount unit in /etc/systemd/system — not
+# fstab lines: one rendered (and tested) file per mount, and services depend on a mount by
+# path with RequiresMountsFor=. This role never creates a filesystem on anything listed
+# here: format a disk or partition yourself, once, and paste its UUID.
+#
+#   - what: UUID=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0   required: UUID=…, PARTUUID=…, LABEL=…,
+#                                                      a /dev/… path, or host:/export (NFS)
+#     where: /srv/data                                 required: absolute path; names the unit
+#     type: xfs                                        default: auto
+#     options: defaults,nofail,noatime                 default: storage_mount_options_default
+#     owner: root                                      optional: ownership and mode of the mounted
+#     group: root                                      filesystem's root directory, applied after
+#     mode: "0755"                                     it is mounted
+storage_mounts: []
+
+# `nofail` keeps a dead data disk from dropping the host into emergency mode at boot: the
+# mount is only wanted, not required, and boot does not wait on it. Services that must not
+# run without it declare RequiresMountsFor=<path> and stay down instead of silently writing
+# into the empty directory underneath (gitlab and gitlab_runner do this).
+storage_mount_options_default: "defaults,nofail,noatime"
+
+# ── LVM logical volumes ──────────────────────────────────────────────────────────────
+# Carved from the free extents of an existing volume group (creating PVs/VGs touches whole
+# disks and stays a human decision). Creation is idempotent; nothing is ever shrunk,
+# resized or removed by a converge — growing is a deliberate operation (README).
+#
+#   - vg: vg0                     required: an existing volume group
+#     name: gitlab                required: the LV is /dev/<vg>/<name>
+#     size: 100G                  required: lvcreate -L <size>, or a share like 20%FREE (-l)
+#     fs: xfs                     optional: create this filesystem (xfs or ext4). The explicit
+#                                 opt-in to formatting — and even then only when the volume
+#                                 carries no signature at all (blkid -p); never forced.
+#     where: /srv/gitlab          optional: also mount it (same keys as storage_mounts:
+#     options: …                  options, owner, group, mode)
+storage_lvs: []

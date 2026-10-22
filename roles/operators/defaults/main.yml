@@ -1,1 +1,54 @@
 ---
+# ── Who administers this host ────────────────────────────────────────────────────────
+# One personal account per person — never a shared login: sudo and sshd logs then name who
+# ran what, and removing one person never means rotating a shared credential.
+#
+#   - name: alice                          required: lowercase [a-z_][a-z0-9_-]*, ≤ 32 chars.
+#                                          Linux names are case-sensitive and useradd accepts
+#                                          capitals, so "Alice" would silently be someone else.
+#     ssh_keys:                            public keys (they are public: keep them in git, the
+#       - ssh-ed25519 AAAA… alice@laptop   list is how access grows back after a rebuild)
+#     shell: /bin/bash                     optional
+#     state: present                       present (default) | absent: the account is deleted,
+#                                          its home directory kept (purging it is a separate,
+#                                          deliberate step — README)
+operators_admins: []
+
+# Create missing accounts (and delete `state: absent` ones). With false, the role only
+# configures accounts that already exist and lists the ones it could not find — for hosts
+# where accounts come from elsewhere (cloud-init, a directory service).
+operators_create_accounts: true
+
+# Group every operator joins next to the OS admin group (wheel / sudo). It carries the sudo
+# policy below and owns operators_repo_dir.
+operators_group: onebox
+
+# sudo keeps asking for the operator's own password by default: a stolen SSH key alone is
+# then not root, and every privileged session starts with a deliberate act. New accounts
+# have a locked password (they can log in with their key but not sudo) until someone sets
+# one — README "Onboarding".
+operators_sudo_nopasswd: false
+
+# ── Managed SSH keys ─────────────────────────────────────────────────────────────────
+# Keys from operators_admins are written, exclusively, to <dir>/<user> and sshd is told to
+# read that file in addition to ~/.ssh/authorized_keys. Removing a key from the inventory
+# revokes it on the next converge, while keys people added to their own
+# ~/.ssh/authorized_keys are never touched (so a typo in the inventory cannot lock anyone out
+# of an existing session path). README "SSH keys" has the full reasoning.
+operators_keys_dir: /etc/ssh/onebox_authorized_keys
+
+# ── Break-glass accounts ─────────────────────────────────────────────────────────────
+# Accounts kept for console/tty rescue only (keyboard and screen, or the hypervisor
+# console): password and sudo stay, network login goes. Enforced twice — sshd `DenyUsers`
+# (rejected before authentication, whatever keys exist) and removal of their
+# ~/.ssh/authorized_keys (so losing the sshd drop-in does not silently re-open the door).
+# Must not overlap operators_admins: that would lock an operator out.
+operators_console_only: []
+
+# ── Shared checkout of this repository (optional) ────────────────────────────────────
+# Path of the onebox checkout several operators edit (e.g. /opt/onebox). When set: the
+# directory becomes root:<operators_group> 2775, git writes group-writable files
+# (core.sharedRepository=group), git trusts the root-owned directory for everyone
+# (safe.directory in /etc/gitconfig), and group-write drift from umask 022 is repaired on
+# every converge. Secrets files are excluded from that repair. Empty = not managed.
+operators_repo_dir: ""

@@ -1,3 +1,16 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Shape checks. The auth key is checked in main.yml, and only when the node still has to
+# join: a node that is already in the tailnet must converge without a (possibly expired) key.
+
+- name: Assert the advertised routes and tags are well-formed
+  ansible.builtin.assert:
+    that:
+      - tailscale_advertise_routes | reject('match', '^[0-9a-fA-F:.]+/[0-9]{1,3}$') | list | length == 0
+      - tailscale_advertise_tags | reject('match', '^(tag:)?[a-zA-Z][a-zA-Z0-9-]*$') | list | length == 0
+      - tailscale_hostname is match('^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$')
+      - tailscale_firewalld_zone != 'trusted'
+    fail_msg: >-
+      tailscale settings are invalid: routes must be CIDRs (e.g. 192.0.2.10/32), tags
+      "tag:name", the hostname a DNS label, and tailscale0 must not go into the "trusted"
+      firewalld zone (that would expose every local port to the whole tailnet)
+    quiet: true

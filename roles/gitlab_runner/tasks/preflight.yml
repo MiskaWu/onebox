@@ -1,3 +1,52 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Variable names only in loops and messages — never the token itself.
+
+- name: Assert the runner authentication token is filled in
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_token is defined
+      - gitlab_runner_token is not match('CHANGE-ME')
+      - gitlab_runner_token is match('glrt-')
+    fail_msg: >-
+      secrets.yml: set gitlab_runner_token (make secrets-set KEY=gitlab_runner_token) to the
+      authentication token ("glrt-…") of a runner created in {{ gitlab_runner_url }} —
+      Admin → CI/CD → Runners → New instance runner (README "Creating the runner": tags,
+      untagged jobs off, no expiry). Legacy registration tokens are not supported.
+    quiet: true
+
+- name: Assert the runner settings are coherent
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_url is match('https?://')
+      - gitlab_runner_concurrent | int >= 1
+      - gitlab_runner_request_concurrency | int >= gitlab_runner_concurrent | int
+      - gitlab_runner_home is match('^/[^ ]+$')
+      - gitlab_runner_home not in ['/', '/var', '/var/lib', '/home']
+      - gitlab_runner_subid_start | int >= 65536
+      - gitlab_runner_subid_count | int >= 65536
+      - gitlab_runner_pasta_address is match('^([0-9]{1,3}[.]){3}[0-9]{1,3}$')
+    fail_msg: >-
+      gitlab_runner settings are incoherent: url must be http(s)://…, request_concurrency must
+      be ≥ concurrent (otherwise free job slots stay empty), home an absolute path of its own,
+      the subordinate id range at least 65536 ids starting at ≥ 65536, and the pasta address IPv4
+    quiet: true
+
+- name: Assert the pasta address is outside every network containers must reach
+  ansible.builtin.assert:
+    that:
+      - _gitlab_runner_pasta_conflicts | length == 0
+    fail_msg: >-
+      gitlab_runner_pasta_address {{ gitlab_runner_pasta_address }} lies inside
+      {{ _gitlab_runner_pasta_conflicts | join(', ') }}: containers could not reach that network
+      (it would look local to them). Pick an unused private range.
+    quiet: true
+
+- name: Assert multi-arch emulation is available on this OS family
+  ansible.builtin.assert:
+    that:
+      - onebox_os_family == 'Debian'
+    fail_msg: >-
+      gitlab_runner_binfmt_enabled: RHEL-family distributions ship no qemu-user-static
+      package. See roles/gitlab_runner/README.md "Multi-arch builds" for the options.
+    quiet: true
+  when: gitlab_runner_binfmt_enabled | bool

@@ -1,1 +1,54 @@
 ---
+# Tailscale: remote access to this host without any inbound port. The node dials out to the
+# coordination server; peers reach it over WireGuard, relays only ever see ciphertext.
+# What lives in the tailnet admin console (route approval, ACLs, Tailnet Lock, key expiry)
+# cannot be managed from here — README "Outside this repository".
+
+# ── Package ──────────────────────────────────────────────────────────────────────────
+# Pinned: a VPN client upgrading itself under you is how remote access breaks at 3 a.m.
+# Check https://pkgs.tailscale.com/stable/ before bumping.
+tailscale_version: "1.104.2"
+
+tailscale_repo_url: https://pkgs.tailscale.com/stable
+# The repository signing key (same key for every distribution). The download is checked
+# against this SHA-256, and on RPM systems the imported key against the fingerprint.
+tailscale_repo_key_sha256: 53c6f7dfbd774839d9f37e6c5022ba952108aba9a0e556a56f292a9eb605d7cf
+tailscale_repo_key_fingerprint: 2596A99EAAB33821893C0A79458CA832957F5868
+
+# Repository coordinates. Read from facts on a real host; render scenarios set them
+# (facts are not gathered there).
+tailscale_repo_distro: "{{ ansible_facts['distribution'] | default('debian') | lower }}"     # debian | ubuntu
+tailscale_repo_codename: "{{ ansible_facts['distribution_release'] | default('trixie') }}"   # trixie, noble, …
+tailscale_repo_el_major: "{{ ansible_facts['distribution_major_version'] | default('9') }}"  # 9, 10
+
+# ── Node ─────────────────────────────────────────────────────────────────────────────
+# Machine name in the tailnet (explicit: OS host names like "localhost" are useless there).
+tailscale_hostname: "onebox-{{ onebox_env }}"
+
+# Routes offered to the tailnet. Only the host's own address by default — not its LAN:
+# advertising a whole subnet hands the tailnet everything on it, including what no host
+# firewall can filter (published container ports and NodePorts are DNAT/FORWARD). With the
+# /32 the existing DNS names keep working unchanged: they already point at this address.
+# Every route must still be approved in the admin console (or by an autoApprovers ACL).
+tailscale_advertise_routes:
+  - "{{ onebox_host_ip }}/32"
+
+# ACL tags requested when the node joins, e.g. ["tag:onebox"]. A tagged node is owned by
+# the tailnet, not by whoever created the auth key — what you want for a server. The auth
+# key must be allowed to apply them. Tags are only applied at join (README).
+tailscale_advertise_tags: []
+
+# Deliberately off — each one widens what this node does for the tailnet:
+tailscale_advertise_exit_node: false   # would route the tailnet's internet traffic through this host
+tailscale_accept_routes: false         # this node is reached, it does not reach into other subnets
+tailscale_accept_dns: false            # keep the host's own resolver (MagicDNS would replace it)
+tailscale_ssh: false                   # Tailscale SSH bypasses sshd: its keys, logs and DenyUsers
+
+# Extra arguments for `tailscale up` at join time, e.g. ["--login-server=https://hs.example.com"]
+# for a self-hosted coordination server.
+tailscale_extra_up_args: []
+
+# firewalld zone of tailscale0 (with common_firewall_backend: firewalld). "public" is the
+# zone that already admits only the edge ports and admin SSH, so a tailnet peer can reach
+# exactly what a LAN client can. Never "trusted": that opens every local port to the tailnet.
+tailscale_firewalld_zone: public

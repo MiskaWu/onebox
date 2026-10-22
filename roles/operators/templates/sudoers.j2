@@ -1,0 +1,11 @@
+# Managed by onebox (roles/operators) — edits are overwritten on the next converge.
+# Members of {{ operators_group }} (the host operators) may run anything as root.
+{% if operators_sudo_nopasswd %}
+# NOPASSWD was chosen in the inventory (operators_sudo_nopasswd): an operator's SSH key
+# alone is root on this host.
+%{{ operators_group }} ALL=(ALL:ALL) NOPASSWD: ALL
+{% else %}
+# sudo asks for the operator's own password: a stolen SSH key alone is not root, and the
+# sudo log names the person.
+%{{ operators_group }} ALL=(ALL:ALL) ALL
+{% endif %}

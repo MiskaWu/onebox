@@ -1,0 +1,16 @@
+---
+# operators_admins with defaults filled in (entries win over the defaults).
+_operators_admins: >-
+  {{ [{'state': 'present', 'ssh_keys': []}] | product(operators_admins) | map('combine') | list }}
+_operators_present: "{{ _operators_admins | selectattr('state', 'equalto', 'present') | list }}"
+_operators_absent_names: "{{ _operators_admins | selectattr('state', 'equalto', 'absent') | map(attribute='name') | list }}"
+
+# Public key types sshd accepts in authorized_keys (OpenSSH 9.x).
+_operators_key_types:
+  - ssh-ed25519
+  - ssh-rsa
+  - ecdsa-sha2-nistp256
+  - ecdsa-sha2-nistp384
+  - ecdsa-sha2-nistp521
+  - sk-ssh-ed25519@openssh.com
+  - sk-ecdsa-sha2-nistp256@openssh.com

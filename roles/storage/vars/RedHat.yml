@@ -1,0 +1,3 @@
+---
+# Rocky / AlmaLinux / RHEL 9+
+_storage_nfs_packages: [nfs-utils]

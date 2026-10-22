@@ -1,0 +1,28 @@
+---
+# Forwarding is only needed when the node routes for others: a route that is not its own
+# address, or the exit-node role. Its own /32 is delivered locally (INPUT), not forwarded.
+_tailscale_forwarding: >-
+  {{ tailscale_advertise_exit_node | bool
+     or tailscale_advertise_routes | reject('equalto', onebox_host_ip ~ '/32') | list | length > 0 }}
+
+# What the node should advertise, as tailscaled stores it (exit node = the default routes).
+_tailscale_want_routes: >-
+  {{ (tailscale_advertise_routes + (['0.0.0.0/0', '::/0'] if tailscale_advertise_exit_node | bool else [])) | sort }}
+
+# Tags as tailscaled stores them ("tag:" prefix is optional on the command line).
+_tailscale_want_tags: >-
+  {{ tailscale_advertise_tags | map('regex_replace', '^(tag:)?', 'tag:') | sort }}
+
+# Settings shared by `tailscale up` (join) and `tailscale set` (converge).
+_tailscale_pref_args:
+  - "--hostname={{ tailscale_hostname }}"
+  - "--advertise-routes={{ tailscale_advertise_routes | join(',') }}"
+  - "--advertise-exit-node={{ tailscale_advertise_exit_node | bool | lower }}"
+  - "--accept-routes={{ tailscale_accept_routes | bool | lower }}"
+  - "--accept-dns={{ tailscale_accept_dns | bool | lower }}"
+  - "--ssh={{ tailscale_ssh | bool | lower }}"
+
+# Where the auth key sits for the few seconds `tailscale up` needs it (tmpfs, 0600). Passed
+# as --auth-key=file:… so the key never appears in the process list, which every local
+# user — including CI jobs on this host — can read.
+_tailscale_authkey_file: /run/onebox-tailscale-authkey

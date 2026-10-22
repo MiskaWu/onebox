@@ -1,0 +1,9 @@
+---
+# Rocky / AlmaLinux / RHEL 9+
+_gitlab_runner_pkg_sep: "-"
+# Same file name as the upstream install script writes: ours replaces it.
+_gitlab_runner_repo_file: /etc/yum.repos.d/runner_gitlab-runner.repo
+_gitlab_runner_foreign_repo_files: []
+_gitlab_runner_key_dir: /etc/pki/rpm-gpg
+# EL 9/10 ship no qemu-user-static at all (README "Multi-arch builds").
+_gitlab_runner_binfmt_packages: []

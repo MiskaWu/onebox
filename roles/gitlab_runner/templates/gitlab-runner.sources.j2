@@ -1,0 +1,7 @@
+# Managed by onebox (roles/gitlab_runner) — edits are overwritten on the next converge.
+# Official GitLab Runner repository; the key is pinned by checksum in the role defaults.
+Types: deb
+URIs: {{ gitlab_runner_repo_url }}/{{ gitlab_runner_repo_distro }}
+Suites: {{ gitlab_runner_repo_codename }}
+Components: main
+Signed-By: {{ _gitlab_runner_repo_key_file }}

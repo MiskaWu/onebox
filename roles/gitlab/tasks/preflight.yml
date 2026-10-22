@@ -1,3 +1,57 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Secrets are checked by variable NAME (lookup), never by value in a message or loop item.
+
+- name: Assert the GitLab secrets are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+      - lookup('ansible.builtin.vars', item, default='') | length > 0
+    fail_msg: "secrets.yml: set {{ item }} (make secrets-set KEY={{ item }}, or secrets-gen for a password)"
+    quiet: true
+  loop: "{{ _gitlab_secret_files.values() | list }}"
+
+# GitLab refuses a weak initial password while seeding the database, and that failure
+# aborts reconfigure: the container exits and restarts in a loop on the very first start.
+# Its rule (below 64 characters): no "gitlab"/"devops", nothing from root's name, username
+# or e-mail ("Administrator", "root", admin@example.com), not on its list of common passwords.
+- name: Assert GitLab will accept the initial root password
+  ansible.builtin.assert:
+    that:
+      - gitlab_root_password | length >= 12
+      - gitlab_root_password | length >= 64 or (gitlab_root_password | lower) is not search('root|admin|gitlab|devops|example')
+    fail_msg: >-
+      gitlab_root_password would be rejected by GitLab: it needs at least 12 characters and must
+      not contain root, admin, gitlab, devops or example. Generate one:
+      make secrets-gen KEY=gitlab_root_password
+    quiet: true
+
+- name: Assert sign-in, mail and registry settings are coherent
+  ansible.builtin.assert:
+    that:
+      - not gitlab_oidc_enabled | bool or onebox_oidc_issuer is match('https://')
+      - not gitlab_oidc_enabled | bool or onebox_oidc_clients.gitlab.redirect_uris | default([]) | length > 0
+      - gitlab_smtp_tls in ['starttls', 'tls', 'none']
+      - gitlab_smtp_authentication in ['login', 'plain', '']
+      - not gitlab_registry_enabled | bool or gitlab_registry_hostname != gitlab_hostname
+      - gitlab_http_port | int != gitlab_registry_port | int
+      - gitlab_data_root is match('^/.+') and gitlab_data_root not in ['/srv', '/var', '/var/lib']
+    fail_msg: >-
+      gitlab settings are incoherent: OIDC needs an https onebox_oidc_issuer and a redirect URI in
+      onebox_oidc_clients.gitlab; gitlab_smtp_tls is starttls|tls|none and
+      gitlab_smtp_authentication login|plain|""; the registry needs its own hostname and port;
+      gitlab_data_root must be a dedicated directory
+    quiet: true
+
+# One address, one port 22, two SSH servers that cannot be told apart (no SNI in SSH): the
+# admin sshd has to move before GitLab can take 22. roles/common moves it lock-out safely.
+- name: Assert the admin sshd has moved off the git-over-SSH port
+  ansible.builtin.assert:
+    that:
+      - common_admin_ssh_port | int != gitlab_ssh_port | int
+    fail_msg: >-
+      gitlab_ssh_enabled publishes git-over-SSH on port {{ gitlab_ssh_port }}, which is still
+      the admin sshd port (common_admin_ssh_port). SSH carries no host name before the
+      handshake, so nothing can route one port to two servers. Set common_admin_ssh_port
+      (e.g. 2222) and run `make common` first, or keep gitlab_ssh_enabled false (HTTPS clones).
+    quiet: true
+  when: gitlab_ssh_enabled | bool

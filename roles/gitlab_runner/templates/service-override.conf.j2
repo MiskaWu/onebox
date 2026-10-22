@@ -1,0 +1,15 @@
+# Managed by onebox (roles/gitlab_runner) — edits are overwritten on the next converge.
+#
+# The package generates gitlab-runner.service itself (`gitlab-runner install`, run by its
+# post-install script) and bakes the home directory into ExecStart at that moment. Changing
+# the home later would leave the unit pointing at the old path ("chdir …: no such file or
+# directory"). This drop-in owns ExecStart instead, so the unit always follows the inventory
+# and package upgrades cannot undo it.
+[Unit]
+# Without its home (a separate volume that failed to mount) the runner would rebuild its
+# whole podman store on the file system underneath, unnoticed.
+RequiresMountsFor={{ gitlab_runner_home }}
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/gitlab-runner run --config {{ _gitlab_runner_config_dir }}/config.toml --working-directory {{ gitlab_runner_home }} --service gitlab-runner --user {{ _gitlab_runner_user }}

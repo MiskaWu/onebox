@@ -1,1 +1,103 @@
 ---
+# GitLab Runner on the host (not in a container): shell executor, builds with the
+# runner account's rootless podman. Read README "Security model" before widening anything —
+# every pipeline that reaches this runner runs its code on this host.
+
+# ── Package ──────────────────────────────────────────────────────────────────────────
+# Pinned (CI infrastructure upgrading itself is the hardest kind of breakage to trace).
+# Keep it on the same minor as the GitLab server. gitlab-runner hard-depends on
+# gitlab-runner-helper-images of the exact same version; both are pinned together.
+gitlab_runner_version: "19.5.0-1"
+
+gitlab_runner_repo_url: https://packages.gitlab.com/runner/gitlab-runner
+# Repository metadata signing key (apt Release files, dnf repo_gpgcheck) …
+gitlab_runner_repo_key_url: https://packages.gitlab.com/gpgkey/gpg.key
+gitlab_runner_repo_key_sha256: 003c0ca2fea61767f8c6de7a1c0f49fc88ea3c8db95e3cd1856b32ce9d876e0f
+gitlab_runner_repo_key_fingerprint: F6403F6544A38863DAA0B6E03F01618A51312F3F
+# … and the key the RPM packages themselves are signed with (RPM systems only).
+gitlab_runner_rpm_key_url: https://packages.gitlab.com/gpgkey/runner/49F16C5CC3A0F81F.pub.gpg
+gitlab_runner_rpm_key_sha256: d6f5a5578c0d6b75572275577c2b9bfbe369935276fc469aa645a0353feb98cf
+gitlab_runner_rpm_key_fingerprint: 931DA69CFA3AFEBBC97DAA8C6C57C29C6BA75A4E
+
+# Repository coordinates. Read from facts on a real host; render scenarios set them.
+gitlab_runner_repo_distro: "{{ ansible_facts['distribution'] | default('debian') | lower }}"     # debian | ubuntu
+gitlab_runner_repo_codename: "{{ ansible_facts['distribution_release'] | default('trixie') }}"   # trixie, noble, …
+gitlab_runner_repo_el_major: "{{ ansible_facts['distribution_major_version'] | default('9') }}"  # 9, 10
+
+# ── Registration ─────────────────────────────────────────────────────────────────────
+# The GitLab instance that issued gitlab_runner_token (secrets.yml, "glrt-…"). Token and
+# URL must belong to the same instance: a token from elsewhere gets 403, and after three
+# of those the runner disables itself for an hour with nothing but a log line to show.
+gitlab_runner_url: "https://{{ gitlab_hostname }}"
+# Local, informational name (the list in GitLab shows the description entered when the
+# runner was created). Convention: <environment>-<os>-<executor>.
+gitlab_runner_name: "{{ onebox_env }}-linux-shell"
+# CA bundle to trust for gitlab_runner_url, when the edge does not use a public CA
+# (edge_tls_mode internal or a corporate CA). Passed to jobs as well (git clone).
+gitlab_runner_tls_ca_file: ""
+
+# ── Concurrency ──────────────────────────────────────────────────────────────────────
+# Jobs running at once. The limit on a shared host is memory, not CPU: GitLab, databases
+# and k3s live here too, and CI starving GitLab does not look like a CI problem. Parallel
+# builds also contend for the single rootless podman store (it has a global lock).
+gitlab_runner_concurrent: 2
+# Parallel long-poll requests for new jobs — not jobs. At 1 the runner logs
+# "Long polling issues detected" and picks up jobs slowly; keep it ≥ concurrent.
+gitlab_runner_request_concurrency: 4
+gitlab_runner_check_interval: 3
+gitlab_runner_log_level: info
+
+# ── Account and home ─────────────────────────────────────────────────────────────────
+# The account is always "gitlab-runner": the package's post-install script creates and
+# configures exactly that name, so another name would leave a second, unmanaged account.
+#
+# Home = rootless podman storage + build directories + caches; it grows. Under /var/lib
+# (state of a system account, FHS) rather than /home, ideally on its own volume
+# (roles/storage) so a runaway cache fills that volume and not /var. Never mounted noexec:
+# rootless podman then fails with "exec user process caused: permission denied" (asserted).
+gitlab_runner_home: /var/lib/gitlab-runner
+# Refuse to converge until the home is a mount point of its own (pair with a storage_lvs
+# entry). Without this, a volume that failed to mount silently gets a fresh, empty home on /var.
+gitlab_runner_home_must_be_mount: false
+
+# Subordinate uid/gid range for the account's user namespace. Any value works as long as no
+# other account's range overlaps it — checked against /etc/subuid and /etc/subgid on every
+# converge, so a collision fails loudly instead of letting two users share container uids.
+gitlab_runner_subid_start: 1000000
+gitlab_runner_subid_count: 65536
+
+# Groups the account must never be in: each would turn "arbitrary pipeline code" into
+# root, log access or another person's privileges. Checked on every converge.
+gitlab_runner_forbidden_groups: [root, wheel, sudo, adm, systemd-journal, docker, lxd, libvirt, disk, shadow, onebox]
+
+# Extra host tools pipelines use directly (shell executor: there is no job image).
+gitlab_runner_extra_packages: []
+
+# ── Rootless networking (pasta) ──────────────────────────────────────────────────────
+# By default pasta gives every rootless container a copy of the host's own address. A job
+# container that resolves gitlab.<domain> to that address then connects to itself and gets
+# "connection refused" within milliseconds — for every service on this host. A private
+# address makes the host's address "another machine" again, reached through pasta's NAT.
+# Must not overlap any network the containers need to reach (LAN, podman, k3s): asserted
+# against gitlab_runner_pasta_avoid_cidrs.
+gitlab_runner_pasta_address: 10.99.0.2
+gitlab_runner_pasta_netmask: 24
+gitlab_runner_pasta_gateway: 10.99.0.1
+gitlab_runner_pasta_avoid_cidrs: >-
+  {{ onebox_internal_cidrs
+     + [onebox_data_subnet, onebox_container_default_cidr, k3s_cluster_cidr, k3s_service_cidr] }}
+
+# ── Storage pruning ──────────────────────────────────────────────────────────────────
+# Jobs keep the layer cache on purpose (fast rebuilds), so nothing cleans up after them.
+# A timer prunes stopped containers, dangling images and build cache older than `until`.
+gitlab_runner_prune_schedule: "Sun *-*-* 04:00:00"
+gitlab_runner_prune_until: 168h
+# Also remove unused tagged images (-a). Bounded disk use, but base images count as unused
+# between builds and get pulled again; off keeps the cache, on keeps the disk.
+gitlab_runner_prune_all_images: false
+
+# ── Multi-arch builds ────────────────────────────────────────────────────────────────
+# Register QEMU user-mode emulators (binfmt_misc) so `podman build --platform linux/arm64`
+# can run foreign RUN steps. Debian/Ubuntu only — RHEL-family distributions ship no
+# qemu-user-static (README "Multi-arch builds" for the options there).
+gitlab_runner_binfmt_enabled: false

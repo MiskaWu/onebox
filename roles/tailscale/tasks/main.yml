@@ -1,4 +1,225 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Install (pinned, signed repository) → tailscaled → firewalld zone → join once → converge
+# preferences. Joining needs the auth key only while the node is logged out: auth keys
+# expire, and a node that already joined must keep converging without one.
+
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+# ── Repository and package ───────────────────────────────────────────────────────────
+- name: Remove repository definitions left by the upstream install script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ _tailscale_foreign_repo_files }}"
+  register: _tailscale_foreign
+
+- name: Key directory
+  ansible.builtin.file:
+    path: "{{ _tailscale_key_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the repository signing key (checksum-pinned)
+  ansible.builtin.get_url:
+    url: "{{ _tailscale_key_url }}"
+    dest: "{{ _tailscale_key_file }}"
+    checksum: "sha256:{{ tailscale_repo_key_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _tailscale_key
+
+- name: Import the signing key into rpm (fingerprint-checked)
+  ansible.builtin.rpm_key:
+    key: "{{ _tailscale_key_file }}"
+    fingerprint: "{{ tailscale_repo_key_fingerprint }}"
+    state: present
+  when:
+    - onebox_os_family == 'RedHat'
+    - not (ansible_check_mode and _tailscale_key is changed)   # a dry run did not download it
+
+- name: Write the repository definition
   ansible.builtin.include_tasks: render.yml
+
+- name: Refresh the apt cache for the new repository
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - onebox_os_family == 'Debian'
+    - _tailscale_repo is changed or _tailscale_key is changed or _tailscale_foreign is changed
+
+# A dry run does not write the repository file, so the package manager cannot see the
+# package yet and would fail the whole play (and with it every later play of a full
+# `make check`). Say so and skip instead.
+- name: Note what a dry run cannot show
+  ansible.builtin.debug:
+    msg: "--check: the Tailscale repository is not configured yet, so installation and joining are skipped in this dry run."
+  when: ansible_check_mode and _tailscale_repo is changed
+
+- name: Install and join
+  when: not (ansible_check_mode and _tailscale_repo is changed)
+  block:
+    - name: Install tailscale (pinned)
+      ansible.builtin.package:
+        name: "{{ _tailscale_package }}"
+        state: present
+
+    - name: Run tailscaled
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        enabled: true
+        state: started
+
+    # ── firewalld ────────────────────────────────────────────────────────────────────
+    - name: Read the firewalld zone of tailscale0
+      ansible.builtin.command: firewall-cmd --permanent --get-zone-of-interface=tailscale0
+      register: _tailscale_zone
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: common_firewall_backend == 'firewalld'
+
+    - name: Put tailscale0 in its firewalld zone
+      ansible.builtin.command: >-
+        firewall-cmd --permanent --zone={{ tailscale_firewalld_zone }} --change-interface=tailscale0
+      changed_when: true
+      when:
+        - common_firewall_backend == 'firewalld'
+        - _tailscale_zone.stdout | trim != tailscale_firewalld_zone
+      notify: Reload firewalld
+
+    # ── Join ─────────────────────────────────────────────────────────────────────────
+    - name: Read the node state
+      ansible.builtin.command: tailscale status --json
+      register: _tailscale_status
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Decide what the node needs
+      ansible.builtin.set_fact:
+        _tailscale_state: >-
+          {{ (_tailscale_status.stdout | from_json).BackendState | default('NoState')
+             if (_tailscale_status.stdout | default('') | trim) is match('^[{]') else 'NoState' }}
+
+    # Not in preflight: an already joined node must keep converging after its key expired.
+    - name: Assert an auth key is available for joining
+      ansible.builtin.assert:
+        that:
+          - tailscale_auth_key is defined
+          - tailscale_auth_key is not match('CHANGE-ME')
+          - tailscale_auth_key | length > 0
+        fail_msg: >-
+          This node is not in a tailnet yet (state {{ _tailscale_state }}) and needs
+          tailscale_auth_key: admin console → Settings → Keys → Generate auth key (reusable
+          off, ephemeral off, pre-approved and tagged if your ACLs use tags), then
+          `make secrets-set KEY=tailscale_auth_key`. Not ready for remote access yet? Drop
+          tailscale from onebox_components instead of leaving a placeholder.
+        quiet: true
+      when: _tailscale_state in ['NeedsLogin', 'NoState']
+
+    - name: Join the tailnet
+      when: _tailscale_state in ['NeedsLogin', 'NoState']
+      block:
+        - name: Hand the auth key over in a private file
+          ansible.builtin.copy:
+            content: "{{ tailscale_auth_key }}"
+            dest: "{{ _tailscale_authkey_file }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+
+        # --timeout: with a bad key `up` would otherwise print a login URL and wait forever.
+        - name: Tailscale up
+          ansible.builtin.command:
+            argv: >-
+              {{ ['tailscale', 'up', '--reset', '--timeout=120s', '--auth-key=file:' ~ _tailscale_authkey_file,
+                  '--advertise-tags=' ~ (_tailscale_want_tags | join(','))]
+                 + _tailscale_pref_args + tailscale_extra_up_args }}
+          changed_when: true
+      always:
+        - name: Remove the auth key file
+          ansible.builtin.file:
+            path: "{{ _tailscale_authkey_file }}"
+            state: absent
+
+    # ── Read preferences ─────────────────────────────────────────────────────────
+    # `tailscale debug prefs` is a debug command without a stable format promise: when it
+    # cannot be read, the settings are applied anyway (`tailscale set` with equal values is
+    # harmless) rather than silently skipped.
+    - name: Read the current preferences
+      ansible.builtin.command: tailscale debug prefs
+      register: _tailscale_prefs_raw
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _tailscale_state in ['Running', 'Starting', 'Stopped']
+
+    - name: Parse the current preferences
+      ansible.builtin.set_fact:
+        _tailscale_prefs: >-
+          {{ _tailscale_prefs_raw.stdout | from_json
+             if (_tailscale_prefs_raw.rc | default(1) == 0 and (_tailscale_prefs_raw.stdout | default('') | trim) is match('^[{]'))
+             else {} }}
+      when: _tailscale_state in ['Running', 'Starting', 'Stopped']
+
+    # Logged in but switched off (`tailscale down`): the declared state is "up", and no key
+    # is needed. The node's current tags are passed back unchanged (see the tags note below).
+    - name: Bring a stopped node back up
+      ansible.builtin.command:
+        argv: "{{ ['tailscale', 'up', '--reset', '--timeout=120s',
+                   '--advertise-tags=' ~ (_tailscale_prefs.AdvertiseTags | default([], true) | join(','))]
+                  + _tailscale_pref_args + tailscale_extra_up_args }}"
+      changed_when: true
+      when: _tailscale_state == 'Stopped'
+
+    - name: Report a node waiting for approval
+      ansible.builtin.debug:
+        msg: >-
+          The node is logged in but waits for device approval: approve "{{ tailscale_hostname }}"
+          in the admin console (Machines), then converge again.
+      when: _tailscale_state == 'NeedsMachineAuth'
+
+    - name: Apply the declared preferences
+      ansible.builtin.command:
+        argv: "{{ ['tailscale', 'set'] + _tailscale_pref_args }}"
+      changed_when: true
+      when:
+        - _tailscale_state in ['Running', 'Starting']
+        - (_tailscale_prefs.AdvertiseRoutes | default([], true) | sort) != _tailscale_want_routes
+          or (_tailscale_prefs.RouteAll | default(none)) != (tailscale_accept_routes | bool)
+          or (_tailscale_prefs.CorpDNS | default(none)) != (tailscale_accept_dns | bool)
+          or (_tailscale_prefs.RunSSH | default(none)) != (tailscale_ssh | bool)
+          or (_tailscale_prefs.Hostname | default('')) != tailscale_hostname
+
+    # Tags can only change through a new `tailscale up`, which the coordination server may
+    # answer with a re-authentication prompt — not something to trigger unattended.
+    - name: Report tags that differ from the inventory
+      ansible.builtin.debug:
+        msg:
+          - "The node carries tags {{ _tailscale_prefs.AdvertiseTags | default([], true) }},
+             the inventory wants {{ _tailscale_want_tags }}."
+          - "Tags are applied when the node joins. To change them: retag the machine in the admin console,"
+          - "or run `sudo tailscale up --reset --advertise-tags=... <same flags>` interactively."
+      when:
+        - _tailscale_prefs is defined
+        - _tailscale_prefs | length > 0
+        - (_tailscale_prefs.AdvertiseTags | default([], true) | sort) != _tailscale_want_tags
+
+    - name: Read the tailnet address
+      ansible.builtin.command: tailscale ip -4
+      register: _tailscale_ip
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show what still needs the admin console
+      ansible.builtin.debug:
+        msg:
+          - "{{ tailscale_hostname }}: {{ _tailscale_ip.stdout | default('') | trim or '(no tailnet address yet)' }}"
+          - "Advertised routes {{ _tailscale_want_routes | join(', ') }} work only once approved in the admin console"
+          - "(or by an autoApprovers ACL). Linux clients must run `tailscale up --accept-routes` to use them."

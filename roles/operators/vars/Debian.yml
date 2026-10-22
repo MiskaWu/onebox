@@ -1,0 +1,4 @@
+---
+# Debian 13+ / Ubuntu 24.04+
+_operators_os_admin_group: sudo    # granted sudo by the stock /etc/sudoers; polkit admin
+_operators_sshd_service: ssh

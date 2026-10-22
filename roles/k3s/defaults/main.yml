@@ -63,11 +63,8 @@ k3s_reserved_cidrs:
 # on every local address, 127.0.0.1 included: a Service that drew the cluster gateway's
 # loopback port would silently steal the edge's traffic. 31000-32767 stays free for
 # host-network listeners (k3s_gateway_http_port).
-# Pods reach platform services (OIDC issuer, OpenBao, Git) through the edge, and those vhosts
-# are LAN-only by default. Packets from a pod to the host keep the pod address as source, so
-# the edge only lets them in when k3s_cluster_cidr is listed in onebox_lan_cidrs. With this
-# true the preflight insists on it; set false if no pod should reach internal-only vhosts.
-k3s_pods_trusted_by_edge: true
+# Pods reach platform services (OIDC issuer, OpenBao, Git) through the edge: k3s_cluster_cidr
+# joins onebox_internal_cidrs automatically (switch: k3s_pods_trusted_by_edge, group_vars).
 
 # Extra names/addresses in the API server certificate. The API is not opened in the firewall;
 # remote kubectl goes through an SSH tunnel (ssh -L 6443:127.0.0.1:6443 <host>).

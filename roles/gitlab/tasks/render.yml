@@ -1,3 +1,98 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Files this role writes. Included by main.yml and by tests/render.yml (render mode).
+
+# The data root is closed to everyone but root: the bind-mounted directories below get the
+# ownership and modes omnibus chooses (reconfigure sets them on every start), so the host-side
+# guard has to be their parent.
+- name: GitLab data root (root only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ gitlab_data_root }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+
+# No owner/mode on purpose: reconfigure chowns these to users inside the container and sets
+# its own modes; forcing ours would fight it on every converge (and usually loosen them).
+- name: Volume directories (permissions are omnibus's)  # noqa: risky-file-permissions
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+  loop: >-
+    {{ [gitlab_data_root ~ '/config', gitlab_data_root ~ '/data', gitlab_data_root ~ '/logs']
+       + ([gitlab_shared_dir] if gitlab_shared_dir | length > 0 else [])
+       + ([gitlab_backup_dir] if gitlab_backup_dir | length > 0 else []) }}
+
+- name: Secrets directory (root only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _gitlab_secrets_dir }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+
+- name: Secret files read by gitlab.rb
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.vars', item.value) }}"
+    dest: "{{ onebox_root }}{{ _gitlab_secrets_dir }}/{{ item.key }}"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"
+  loop: "{{ _gitlab_secret_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+  register: _gitlab_secrets
+
+- name: No secret files for features that are off
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _gitlab_secrets_dir }}/{{ item }}"
+    state: absent
+  loop: "{{ _gitlab_known_secret_files | difference(_gitlab_secret_files.keys()) }}"
+
+- name: Write gitlab.rb
+  ansible.builtin.template:
+    src: gitlab.rb.j2
+    dest: "{{ onebox_root }}{{ gitlab_data_root }}/config/gitlab.rb"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0600"
+  register: _gitlab_rb
+
+- name: Quadlet and systemd directories (render mode only)
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/containers/systemd
+    - /etc/systemd/system
+  when: onebox_render_only | bool
+
+- name: Quadlet unit
+  ansible.builtin.template:
+    src: gitlab.container.j2
+    dest: "{{ onebox_root }}/etc/containers/systemd/gitlab.container"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _gitlab_unit
+
+- name: Backup service
+  ansible.builtin.template:
+    src: gitlab-backup.service.j2
+    dest: "{{ onebox_root }}/etc/systemd/system/gitlab-backup.service"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _gitlab_backup_service
+
+- name: Backup timer
+  ansible.builtin.template:
+    src: gitlab-backup.timer.j2
+    dest: "{{ onebox_root }}/etc/systemd/system/gitlab-backup.timer"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  register: _gitlab_backup_timer
+  when: gitlab_backup_schedule | length > 0

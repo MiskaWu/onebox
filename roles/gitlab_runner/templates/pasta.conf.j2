@@ -1,0 +1,6 @@
+# Managed by onebox (roles/gitlab_runner) — edits are overwritten on the next converge.
+# Rootless podman networking for the runner account. pasta's default copies the host's own
+# address into each container, so a job resolving a name of this host connects to itself.
+# A private address makes the host look like another machine, reached through pasta's NAT.
+[network]
+pasta_options = ["-a", "{{ gitlab_runner_pasta_address }}", "-n", "{{ gitlab_runner_pasta_netmask }}", "-g", "{{ gitlab_runner_pasta_gateway }}"]

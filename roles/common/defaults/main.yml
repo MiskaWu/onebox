@@ -1,15 +1,14 @@
 ---
 # ── Firewall ─────────────────────────────────────────────────────────────────────────
-# firewalld : managed here; other roles open their ports through tasks/firewall_open.yml
-# none      : leave the host firewall alone (cloud security groups, an external firewall)
-common_firewall_backend: firewalld
+# common_firewall_backend (firewalld | none) is set in group_vars/all/onebox.yml: other roles
+# read it. With firewalld, roles open their ports through tasks/firewall_open.yml.
 
 # ── Admin SSH ────────────────────────────────────────────────────────────────────────
 # Port the host's own sshd listens on. Move it off 22 when 22 should belong to the Git
 # forge (git-over-SSH has no SNI, so one IP's port 22 serves exactly one of the two).
 # The move is lock-out safe: the new port is opened and verified to be served by sshd
 # before the old one is closed, and the old one stays open while you are connected on it.
-common_admin_ssh_port: 22
+# common_admin_ssh_port itself is set in group_vars/all/onebox.yml (GitLab reads it too).
 # Restrict the admin port to these sources (firewalld rich rules). Empty = any source.
 common_admin_ssh_allowed_cidrs: []
 

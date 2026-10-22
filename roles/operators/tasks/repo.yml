@@ -1,0 +1,107 @@
+---
+# A checkout of this repository that several operators edit (operators_repo_dir).
+#
+# Group ownership plus setgid alone does not stay shared: with the usual umask 022 every new
+# file is 0644, so the next person cannot edit it — and since git replaces files by unlink +
+# create, they cannot even `git pull` ("Permission denied", which does not look like a
+# permissions drift at all). Two halves fix it: git itself writes group-writable files
+# (core.sharedRepository=group), and every converge repairs what editors and cp created.
+
+- name: Shared checkout directory (setgid, group-writable)
+  ansible.builtin.file:
+    path: "{{ operators_repo_dir }}"
+    state: directory
+    owner: root
+    group: "{{ operators_group }}"
+    mode: "2775"
+
+- name: Check whether the directory is a git checkout
+  ansible.builtin.stat:
+    path: "{{ operators_repo_dir }}/.git"
+  register: _operators_repo_git
+
+# (In a dry run on a new host the directory does not exist yet: nothing to inspect.)
+- name: Check that the directory exists
+  ansible.builtin.stat:
+    path: "{{ operators_repo_dir }}"
+  register: _operators_repo_stat
+
+# git refuses to work in a directory owned by someone else ("dubious ownership") — and
+# root owns this one. The exception only lets git operate there; who may write is still
+# decided by the file system (the group).
+- name: Read the system-wide git safe.directory list
+  ansible.builtin.command: git config --system --get-all safe.directory
+  register: _operators_safe_dirs
+  changed_when: false
+  failed_when: _operators_safe_dirs.rc not in [0, 1]
+  check_mode: false
+
+- name: Let git trust the shared checkout for every operator
+  ansible.builtin.command: git config --system --add safe.directory {{ operators_repo_dir }}
+  changed_when: true
+  when: operators_repo_dir not in _operators_safe_dirs.stdout_lines
+
+- name: Read core.sharedRepository
+  ansible.builtin.command: git -C {{ operators_repo_dir }} config --get core.sharedRepository
+  register: _operators_repo_shared
+  changed_when: false
+  failed_when: _operators_repo_shared.rc not in [0, 1]
+  check_mode: false
+  when: _operators_repo_git.stat.exists
+
+- name: Make git create group-writable files
+  ansible.builtin.command: git -C {{ operators_repo_dir }} config core.sharedRepository group
+  changed_when: true
+  when:
+    - _operators_repo_git.stat.exists
+    - _operators_repo_shared.stdout | trim != 'group'
+
+# Directories need setgid + group write; files need group write — except files nobody may
+# write (git objects are 0444 by design; "fixing" them would report drift forever).
+# secrets.yml and vault password files keep their private mode.
+- name: Find directories that lost setgid or group write
+  ansible.builtin.command:
+    argv: [find, "{{ operators_repo_dir }}", -type, d, "!", -perm, -g+ws, -print]
+  register: _operators_repo_dirs
+  changed_when: false
+  check_mode: false
+  when: _operators_repo_stat.stat.exists
+
+- name: Find writable files that are not group-writable
+  ansible.builtin.command:
+    argv:
+      - find
+      - "{{ operators_repo_dir }}"
+      - "("
+      - -name
+      - secrets.yml
+      - -o
+      - -name
+      - "*.vault-pass"
+      - ")"
+      - -prune
+      - -o
+      - -type
+      - f
+      - -perm
+      - -u+w
+      - "!"
+      - -perm
+      - -g+w
+      - -print
+  register: _operators_repo_files
+  changed_when: false
+  check_mode: false
+  when: _operators_repo_stat.stat.exists
+
+- name: Repair directories
+  ansible.builtin.command:
+    argv: "{{ ['chmod', 'g+ws'] + _operators_repo_dirs.stdout_lines }}"
+  changed_when: true
+  when: _operators_repo_dirs.stdout_lines | default([]) | length > 0
+
+- name: Repair files
+  ansible.builtin.command:
+    argv: "{{ ['chmod', 'g+w'] + _operators_repo_files.stdout_lines }}"
+  changed_when: true
+  when: _operators_repo_files.stdout_lines | default([]) | length > 0

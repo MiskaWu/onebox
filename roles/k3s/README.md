@@ -71,9 +71,10 @@ Secret (only when `k3s_registry_username` is set): `k3s_registry_password`.
   file's sha256 into `AddOn.spec.checksum` only after *every* object in it was applied, so the
   helper waits for that equality and, on timeout, prints the AddOn's events. A manifest the API
   server rejects therefore fails the converge instead of passing silently.
-- **Pod CIDR in `onebox_lan_cidrs`:** pods reach the OIDC issuer, OpenBao and Git through the
-  edge with their pod address as the client address, and those vhosts are internal-only. The
-  preflight insists on `k3s_cluster_cidr` being listed (ADR 0006, 0017).
+- **Pods count as internal at the edge:** pods reach the OIDC issuer, OpenBao and Git through
+  the edge with their pod address as the client address, and those vhosts are internal-only.
+  `k3s_cluster_cidr` joins `onebox_internal_cidrs` automatically while
+  `k3s_pods_trusted_by_edge` is true (ADR 0006, 0017).
 - **NodePort range vs. the gateway port:** kube-proxy DNATs NodePorts on *every* local address,
   127.0.0.1 included. A Service that happened to receive NodePort 31080 would capture the
   edge → gateway traffic. The range is narrowed to 30000-30999 and the preflight checks that

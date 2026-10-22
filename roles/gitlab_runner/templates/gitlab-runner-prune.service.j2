@@ -1,0 +1,20 @@
+# Managed by onebox (roles/gitlab_runner) — edits are overwritten on the next converge.
+[Unit]
+Description=Prune the GitLab Runner's rootless podman storage
+RequiresMountsFor={{ gitlab_runner_home }}
+
+[Service]
+Type=oneshot
+User={{ _gitlab_runner_user }}
+Group={{ _gitlab_runner_user }}
+# A system unit with User= gets HOME but no XDG_RUNTIME_DIR; the shell derives it so the
+# uid is not hard-coded.
+{% if gitlab_runner_prune_all_images %}
+# --all (gitlab_runner_prune_all_images): unused tagged images go too, so base images are
+# pulled again after each prune.
+{% else %}
+# No --all: images that only serve as build cache (base images between builds) survive.
+{% endif %}
+ExecStart=/bin/sh -c 'export XDG_RUNTIME_DIR=/run/user/$$(id -u); exec /usr/bin/podman system prune --force{{ ' --all' if gitlab_runner_prune_all_images else '' }} --filter until={{ gitlab_runner_prune_until }}'
+Nice=10
+IOSchedulingClass=idle

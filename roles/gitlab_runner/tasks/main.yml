@@ -1,4 +1,393 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
-  ansible.builtin.include_tasks: render.yml
+# Order is load-bearing:
+#   1. the account, before the package: the package's post-install script only creates the
+#      account when it is missing (with a home of its choosing) — creating it first means
+#      the inventory decides;
+#   2. rootless podman prerequisites (subordinate ids, linger, pasta) for that account;
+#   3. repository, config.toml, then the package: its post-install starts the service, and
+#      it should start with our configuration;
+#   4. the unit drop-in, the prune timer, the service.
+
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+# ── 1. Account and home ──────────────────────────────────────────────────────────────
+- name: Check whether the home is a mount point of its own
+  ansible.builtin.command: mountpoint -q {{ gitlab_runner_home }}
+  register: _gitlab_runner_home_mount
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: gitlab_runner_home_must_be_mount | bool
+
+- name: Assert the home volume is mounted
+  ansible.builtin.assert:
+    that:
+      - _gitlab_runner_home_mount.rc == 0
+    fail_msg: >-
+      {{ gitlab_runner_home }} is not a mount point (gitlab_runner_home_must_be_mount). Mount its
+      volume first (sudo make storage) — otherwise the runner's whole podman store would be
+      rebuilt on the file system underneath.
+    quiet: true
+  when: gitlab_runner_home_must_be_mount | bool
+
+- name: Runner account (before the package; see the top of this file)
+  ansible.builtin.user:
+    name: "{{ _gitlab_runner_user }}"
+    system: true
+    shell: /bin/bash
+    home: "{{ gitlab_runner_home }}"
+    create_home: true
+    comment: GitLab Runner
+  register: _gitlab_runner_account
+
+# A freshly mounted volume's root directory is root:root, and useradd does not chown an
+# existing directory: rootless podman would fail on its first write.
+- name: The home belongs to the runner
+  ansible.builtin.file:
+    path: "{{ gitlab_runner_home }}"
+    state: directory
+    owner: "{{ _gitlab_runner_user }}"
+    group: "{{ _gitlab_runner_user }}"
+    mode: "0700"
+
+- name: Read the mount options of the home
+  ansible.builtin.command: findmnt -n -o OPTIONS --target {{ gitlab_runner_home }}
+  register: _gitlab_runner_home_opts
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode or _gitlab_runner_account is not changed
+
+- name: Assert the home is not mounted noexec
+  ansible.builtin.assert:
+    that:
+      - "'noexec' not in _gitlab_runner_home_opts.stdout | trim | split(',')"
+    fail_msg: >-
+      {{ gitlab_runner_home }} is on a file system mounted noexec: rootless podman cannot run
+      anything there ("exec user process caused: permission denied"). nodev and nosuid are fine.
+    quiet: true
+  when: _gitlab_runner_home_opts.stdout is defined
+
+# Pipeline code runs as this account on the host; membership in any of these would hand
+# that code root (wheel/sudo/docker), the logs (adm/systemd-journal) or raw disks.
+- name: Read the runner's groups
+  ansible.builtin.command: id -nG {{ _gitlab_runner_user }}
+  register: _gitlab_runner_groups
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert the runner is in no privileged group
+  ansible.builtin.assert:
+    that:
+      - _gitlab_runner_groups.stdout.split() | intersect(gitlab_runner_forbidden_groups) | length == 0
+    fail_msg: >-
+      {{ _gitlab_runner_user }} is a member of
+      {{ _gitlab_runner_groups.stdout.split() | intersect(gitlab_runner_forbidden_groups) | join(', ') }}.
+      Every pipeline runs as this account on the host, so this hands arbitrary CI code those
+      privileges. Remove it: gpasswd -d {{ _gitlab_runner_user }} <group>.
+    quiet: true
+  when: _gitlab_runner_groups.rc == 0
+
+# Rootless container storage has SELinux file-context rules only below /home/<user>; a
+# home under /var/lib gets var_lib_t and containers fail to start. An equivalence rule
+# (not chcon, which restorecon would undo) labels the whole home like /home/<user> —
+# identical labels to a stock home, including dotfiles.
+- name: SELinux labels for a home outside /home
+  when:
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - not gitlab_runner_home is match('/home/')
+  block:
+    - name: Read local SELinux file-context equivalences
+      ansible.builtin.command: semanage fcontext --list --locallist
+      register: _gitlab_runner_fcontext
+      changed_when: false
+      check_mode: false
+
+    - name: Label the home like /home/{{ _gitlab_runner_user }}
+      ansible.builtin.command: semanage fcontext --add --equal {{ _gitlab_runner_selinux_equiv }} {{ gitlab_runner_home }}
+      register: _gitlab_runner_equiv
+      changed_when: true
+      when: (gitlab_runner_home ~ ' = ' ~ _gitlab_runner_selinux_equiv) not in _gitlab_runner_fcontext.stdout
+
+    # Only when something changed: the home holds the whole image store, and a recursive
+    # relabel of that on every converge is slow. Count only "Relabeled" lines as changes —
+    # restorecon also prints refusals for files podman labelled container_file_t, which it
+    # rightly leaves alone, and those must not make every run "changed".
+    - name: Relabel the home
+      ansible.builtin.command: restorecon -R -v {{ gitlab_runner_home }}
+      register: _gitlab_runner_restorecon
+      changed_when: _gitlab_runner_restorecon.stdout_lines | select('match', 'Relabeled ') | list | length > 0
+      when: _gitlab_runner_equiv is changed or _gitlab_runner_account is changed
+
+# ── 2. Rootless podman prerequisites ─────────────────────────────────────────────────
+- name: Read the subordinate id files
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: [/etc/subuid, /etc/subgid]
+  register: _gitlab_runner_subid_files
+  failed_when: false
+
+- name: Assert no other account's subordinate range overlaps the runner's
+  ansible.builtin.assert:
+    that:
+      - _gitlab_runner_subid_overlaps | length == 0
+    fail_msg: >-
+      gitlab_runner_subid_start/count ({{ gitlab_runner_subid_start }}+{{ gitlab_runner_subid_count }})
+      overlaps {{ _gitlab_runner_subid_overlaps | join('; ') }}. Two accounts sharing ids would
+      share file ownership inside their containers. Choose a free range.
+    quiet: true
+  vars:
+    _gitlab_runner_subid_overlaps: |
+      {% set start = gitlab_runner_subid_start | int %}
+      {% set end = start + gitlab_runner_subid_count | int %}
+      {% set out = [] %}
+      {% for f in _gitlab_runner_subid_files.results if f.content is defined %}
+      {%   for line in (f.content | b64decode).splitlines() if line.split(':') | length == 3 %}
+      {%     set p = line.split(':') %}
+      {%     if p[0] != _gitlab_runner_user and (p[1] | int) < end and start < (p[1] | int) + (p[2] | int) %}
+      {%       set _ = out.append(f.item ~ ' ' ~ line) %}
+      {%     endif %}
+      {%   endfor %}
+      {% endfor %}
+      {{ out }}
+
+- name: Subordinate uid/gid range of the runner
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: "^{{ _gitlab_runner_user }}:"
+    line: "{{ _gitlab_runner_user }}:{{ gitlab_runner_subid_start }}:{{ gitlab_runner_subid_count }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [/etc/subuid, /etc/subgid]
+  register: _gitlab_runner_subid
+
+# Without linger /run/user/<uid> exists only during a login session — never, for this
+# account. `creates:` makes the command idempotent for real.
+- name: Keep the runner's user manager running without a login (linger)
+  ansible.builtin.command: loginctl enable-linger {{ _gitlab_runner_user }}
+  args:
+    creates: /var/lib/systemd/linger/{{ _gitlab_runner_user }}
+
+# Linger being *enabled* is not the same as the user manager *running*: after a
+# `loginctl terminate-user` the flag stays but user@<uid> is gone, rootless podman falls back
+# to cgroupfs and complains about a missing systemd session. So the running state is
+# converged too.
+- name: Start the runner's user manager
+  ansible.builtin.systemd_service:
+    name: "user@{{ _gitlab_runner_uid }}.service"
+    state: started
+  when: not ansible_check_mode
+
+# Only when the range changed: migrate rebuilds podman's user-namespace mapping. A task,
+# not a handler: the pasta and netns steps below need podman in its final state.
+- name: Let rootless podman pick up the new id range  # noqa: no-handler
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ _gitlab_runner_user }}"
+      - --
+      - env
+      - "HOME={{ gitlab_runner_home }}"
+      - "XDG_RUNTIME_DIR=/run/user/{{ _gitlab_runner_uid }}"
+      - podman
+      - system
+      - migrate
+  changed_when: true
+  when: _gitlab_runner_subid is changed
+
+- name: Write the pasta configuration
+  ansible.builtin.include_tasks: render_home.yml
+
+# The rootless network namespace's pasta process is long-lived: one started before the
+# configuration changed keeps serving every bridge-networked container with the old setup.
+# A pasta whose command line lacks the configured address is stale; killing it makes podman
+# start a fresh one with the new options for the next container.
+- name: Find pasta processes started with an old configuration
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for pid in $(pgrep -u {{ _gitlab_runner_user }} '^pasta' || true); do
+        tr '\0' ' ' < /proc/$pid/cmdline | grep -qF -- ' {{ gitlab_runner_pasta_address }} ' || echo "$pid"
+      done
+    executable: /bin/bash
+  register: _gitlab_runner_stale_pasta
+  changed_when: false
+  check_mode: false
+
+- name: Stop stale pasta processes
+  ansible.builtin.command:
+    argv: "{{ ['kill'] + _gitlab_runner_stale_pasta.stdout_lines }}"
+  changed_when: true
+  when: _gitlab_runner_stale_pasta.stdout_lines | length > 0
+
+# Killing pasta leaves podman's bookkeeping of the rootless netns behind. As long as it is
+# there, podman keeps attaching containers to that netns — which has no way out any more —
+# instead of creating a new one: pulls work (they run in the host netns), the job's first
+# connection is refused. Bookkeeping with no live pasta behind it is removed (aardvark-dns
+# too); podman rebuilds all of it on the next container. Two candidate runtime dirs: the
+# normal one and the /tmp fallback podman uses when it ran before linger was in place.
+- name: Find rootless network namespaces without a pasta behind them
+  ansible.builtin.shell:
+    cmd: |
+      for d in /run/user/{{ _gitlab_runner_uid }} /tmp/storage-run-{{ _gitlab_runner_uid }} /tmp/podman-run-{{ _gitlab_runner_uid }}; do
+        ns="$d/containers/networks/rootless-netns"
+        [ -d "$ns" ] || continue
+        pgrep -u {{ _gitlab_runner_user }} -f -- "$ns" >/dev/null || echo "$ns"
+      done
+    executable: /bin/bash
+  register: _gitlab_runner_zombie_netns
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode or _gitlab_runner_account is not changed
+
+- name: Remove orphaned rootless network namespace state
+  ansible.builtin.shell:
+    cmd: |
+      umount "{{ item }}/rootless-netns" 2>/dev/null || true
+      rm -rf -- "{{ item }}"
+      pkill -u {{ _gitlab_runner_user }} -x aardvark-dns || true
+    executable: /bin/bash
+  loop: "{{ _gitlab_runner_zombie_netns.stdout_lines | default([]) }}"
+  changed_when: true
+
+# ── 3. Repository, configuration, package ────────────────────────────────────────────
+- name: Remove repository definitions left by the upstream install script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ _gitlab_runner_foreign_repo_files }}"
+  register: _gitlab_runner_foreign
+
+- name: Key directory
+  ansible.builtin.file:
+    path: "{{ _gitlab_runner_key_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the repository signing keys (checksum-pinned)
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.dest }}"
+    checksum: "sha256:{{ item.sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _gitlab_runner_keys }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: _gitlab_runner_key
+  vars:
+    _gitlab_runner_keys: >-
+      {{ [{'url': gitlab_runner_repo_key_url, 'dest': _gitlab_runner_repo_key_file,
+           'sha256': gitlab_runner_repo_key_sha256, 'fingerprint': gitlab_runner_repo_key_fingerprint}]
+         + ([{'url': gitlab_runner_rpm_key_url, 'dest': _gitlab_runner_rpm_key_file,
+              'sha256': gitlab_runner_rpm_key_sha256, 'fingerprint': gitlab_runner_rpm_key_fingerprint}]
+            if onebox_os_family == 'RedHat' else []) }}
+
+- name: Import the keys into rpm (fingerprint-checked)
+  ansible.builtin.rpm_key:
+    key: "{{ item.item.dest }}"
+    fingerprint: "{{ item.item.fingerprint }}"
+    state: present
+  loop: "{{ _gitlab_runner_key.results }}"
+  loop_control:
+    label: "{{ item.item.dest }}"
+  when:
+    - onebox_os_family == 'RedHat'
+    - not (ansible_check_mode and item is changed)   # a dry run did not download it
+
+- name: Write the repository definition
+  ansible.builtin.include_tasks: render_repo.yml
+
+- name: Refresh the apt cache for the new repository
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - onebox_os_family == 'Debian'
+    - _gitlab_runner_repo is changed or _gitlab_runner_key is changed or _gitlab_runner_foreign is changed
+
+- name: Write the runner configuration and units
+  ansible.builtin.include_tasks: render_service.yml
+
+- name: Note what a dry run cannot show
+  ansible.builtin.debug:
+    msg: "--check: the GitLab Runner repository is not configured yet, so the package step is skipped in this dry run."
+  when: ansible_check_mode and _gitlab_runner_repo is changed
+
+# NO_DOCKER_PRUNE: the package's post-install runs `clear-docker-cache prune`, which falls
+# back to podman when docker is absent — as root, against the host's *rootful* store, and
+# its `network prune` is unfiltered: it would delete podman networks the platform's
+# services rely on (onebox-data) whenever none of their containers happens to be running.
+- name: Install gitlab-runner (pinned, with matching helper images)
+  ansible.builtin.package:
+    name: "{{ _gitlab_runner_packages + gitlab_runner_extra_packages
+              + (_gitlab_runner_binfmt_packages if gitlab_runner_binfmt_enabled | bool else []) }}"
+    state: present
+  environment:
+    NO_DOCKER_PRUNE: "1"
+  register: _gitlab_runner_pkg
+  when: not (ansible_check_mode and _gitlab_runner_repo is changed)
+  notify: Restart systemd-binfmt
+
+# ── 4. Service ───────────────────────────────────────────────────────────────────────
+- name: Let systemd read the drop-in and the prune units  # noqa: no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _gitlab_runner_dropin is changed or _gitlab_runner_prune_units is changed or _gitlab_runner_pkg is changed
+
+# config.toml changes need nothing: the runner reloads it by itself. A new unit definition
+# (drop-in, package) needs a restart.
+- name: Run gitlab-runner
+  ansible.builtin.systemd_service:
+    name: gitlab-runner.service
+    enabled: true
+    state: "{{ 'restarted' if (_gitlab_runner_dropin is changed or _gitlab_runner_pkg is changed) else 'started' }}"
+  when: not ansible_check_mode
+
+- name: Run the prune timer
+  ansible.builtin.systemd_service:
+    name: gitlab-runner-prune.timer
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+# A token issued by another GitLab instance, or a runner deleted in GitLab, only shows as
+# 403s in the runner's log (followed by an hour of self-imposed silence). Ask GitLab now.
+- name: Verify the token with GitLab
+  ansible.builtin.uri:
+    url: "{{ gitlab_runner_url }}/api/v4/runners/verify"
+    method: POST
+    body_format: json
+    body:
+      token: "{{ gitlab_runner_token }}"
+    ca_path: "{{ gitlab_runner_tls_ca_file if gitlab_runner_tls_ca_file | length > 0 else omit }}"
+    status_code: [200, 403]
+    timeout: 15
+  register: _gitlab_runner_verify
+  failed_when: false
+  no_log: true   # request and response carry the token
+  check_mode: false
+
+- name: Assert GitLab accepts the token
+  ansible.builtin.assert:
+    that:
+      - _gitlab_runner_verify.status | default(0) != 403
+    fail_msg: >-
+      {{ gitlab_runner_url }} rejects gitlab_runner_token (403): the token was issued by another
+      GitLab instance, or the runner was deleted there. Create the runner in this instance and
+      set the new token (make secrets-set KEY=gitlab_runner_token).
+    quiet: true
+
+- name: Report when GitLab could not be asked
+  ansible.builtin.debug:
+    msg: >-
+      Could not reach {{ gitlab_runner_url }} to verify the token ({{ _gitlab_runner_verify.msg | default('no answer') }}).
+      Normal while GitLab is still starting; otherwise check name resolution and TLS trust
+      (gitlab_runner_tls_ca_file). The runner keeps retrying on its own.
+  when: _gitlab_runner_verify.status | default(-1) not in [200, 403]

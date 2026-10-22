@@ -1,0 +1,21 @@
+---
+- name: Rootless podman configuration directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item }}"
+    state: directory
+    owner: "{{ _gitlab_runner_owner }}"
+    group: "{{ _gitlab_runner_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ gitlab_runner_home }}/.config"
+    - "{{ gitlab_runner_home }}/.config/containers"
+    - "{{ _gitlab_runner_pasta_dir }}"
+
+- name: Pasta address for the runner's containers
+  ansible.builtin.template:
+    src: pasta.conf.j2
+    dest: "{{ onebox_root }}{{ _gitlab_runner_pasta_dir }}/50-onebox-pasta.conf"
+    owner: "{{ _gitlab_runner_owner }}"
+    group: "{{ _gitlab_runner_owner }}"
+    mode: "0644"
+  register: _gitlab_runner_pasta

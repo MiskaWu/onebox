@@ -58,7 +58,8 @@ in OpenBao.
 names the one that fails:
 
 1. **The edge lets the pod in.** OpenBao's vhost is internal-only; a pod's packets keep the pod
-   address, so `k3s_cluster_cidr` must be in `onebox_lan_cidrs` (the k3s preflight enforces it).
+   address; `k3s_cluster_cidr` is part of `onebox_internal_cidrs` automatically (unless
+   `k3s_pods_trusted_by_edge: false`).
    Symptom otherwise: `403`.
 2. **Pods resolve the name.** CoreDNS forwards to the host's resolvers; if the name only resolves
    on the host, pin it with `k3s_coredns_hosts`. Symptom: `no such host`.

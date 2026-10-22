@@ -1,0 +1,12 @@
+---
+# forge roles in the minimal Debian scenario (inert until their components are listed).
+operators_admins:
+  - name: alice
+    ssh_keys: [ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUseExampleKeyDoNotUse0 alice@laptop]
+storage_mounts:
+  - {what: LABEL=onebox-data, where: /srv/data, type: xfs}
+tailscale_repo_distro: debian
+tailscale_repo_codename: trixie
+gitlab_registry_enabled: false
+gitlab_runner_repo_distro: debian
+gitlab_runner_repo_codename: trixie

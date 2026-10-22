@@ -57,7 +57,7 @@ import {{ edge_confd_dir }}/*.caddy
 {{ edge_portal_hostname }} {
 	import onebox_site
 {% if edge_internal_only_default %}
-	import onebox_internal_only {{ onebox_lan_cidrs | join(' ') }}
+	import onebox_internal_only {{ onebox_internal_cidrs | join(' ') }}
 {% endif %}
 	root * {{ edge_portal_dir }}
 	file_server
@@ -68,7 +68,7 @@ import {{ edge_confd_dir }}/*.caddy
 {{ site.hostname }} {
 	import onebox_site
 {% if site.internal_only | default(edge_internal_only_default) %}
-	import onebox_internal_only {{ (site.allow_cidrs | default(onebox_lan_cidrs)) | join(' ') }}
+	import onebox_internal_only {{ (site.allow_cidrs | default(onebox_internal_cidrs)) | join(' ') }}
 {% endif %}
 {% if site.redirect is defined %}
 	redir {{ site.redirect }} permanent

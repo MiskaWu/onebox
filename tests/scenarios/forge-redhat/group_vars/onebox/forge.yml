@@ -1,0 +1,65 @@
+---
+# forge roles: settings for this scenario.
+
+# ── storage ──
+storage_lvs:
+  - {vg: vg_data, name: gitlab, size: 100G, fs: xfs, where: /srv/gitlab, mode: "0700"}
+  - {vg: vg_data, name: gitlab-runner, size: 20%FREE, fs: xfs, where: /var/lib/gitlab-runner,
+     options: "defaults,nofail,noatime,nodev,nosuid"}
+  - {vg: vg_data, name: scratch, size: 10G}   # raw volume: created, never formatted
+storage_mounts:
+  - what: UUID=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0
+    where: /srv/backup
+    type: xfs
+    owner: root
+    group: root
+    mode: "0700"
+  - what: PARTUUID=11111111-2222-3333-4444-555555555555
+    where: /srv/data
+    type: ext4
+    options: defaults,noatime   # no nofail: this host must not boot without it
+
+# ── operators ──
+operators_admins:
+  - name: alice
+    ssh_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUseExampleKeyDoNotUse0 alice@laptop
+      - ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBExampleOnly alice@phone
+  - name: bob
+    ssh_keys: [ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUseExampleKeyDoNotUse1 bob@laptop]
+    shell: /bin/zsh
+  - name: carol
+    state: absent
+operators_console_only: [rescue]
+operators_repo_dir: /opt/onebox
+
+# ── tailscale ──
+tailscale_repo_el_major: "9"
+tailscale_advertise_tags: [tag:onebox, server]
+tailscale_advertise_routes: [192.0.2.10/32, 198.51.100.0/24]   # second route → forwarding drop-in
+
+# ── gitlab ──
+gitlab_ssh_enabled: true
+gitlab_registry_enabled: true
+gitlab_shared_dir: /srv/data/gitlab-shared
+gitlab_backup_dir: /srv/backup/gitlab
+gitlab_required_mounts: [/srv/gitlab, /srv/data, /srv/backup]
+gitlab_oidc_label: "Bob's \\ SSO"   # exercises Ruby string escaping
+gitlab_oidc_auto_sign_in: true
+gitlab_smtp_enabled: true
+gitlab_smtp_host: email-smtp.example.test
+gitlab_smtp_port: 587
+gitlab_smtp_tls: starttls
+gitlab_smtp_authentication: login
+gitlab_backup_schedule: "*-*-* 02:30:00"
+gitlab_backup_skip: [registry]
+gitlab_trusted_ca_files: [/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt]
+gitlab_puma_workers: 0
+gitlab_rb_extra: |
+  gitlab_rails['gitlab_default_theme'] = 2
+
+# ── gitlab-runner ──
+gitlab_runner_repo_el_major: "9"
+gitlab_runner_home_must_be_mount: true
+gitlab_runner_tls_ca_file: /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+gitlab_runner_concurrent: 3

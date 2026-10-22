@@ -95,12 +95,10 @@ openbao_backup_keep: 14
 
 # ── Edge ─────────────────────────────────────────────────────────────────────────────
 # Internal-only like every vhost. In-cluster clients (External Secrets) come back through the
-# edge with pod addresses, so the pod CIDR is allowed as well when the cluster runs here.
-openbao_pod_cidrs: "{{ [k3s_cluster_cidr | default('10.42.0.0/16')] if 'k3s' in onebox_components else [] }}"
+# edge with pod addresses; onebox_internal_cidrs includes the pod network when k3s runs.
 openbao_vhost_entries:
   - hostname: "{{ openbao_hostname }}"
     upstream: "127.0.0.1:{{ openbao_http_port }}"
     title: OpenBao
     description: Secrets store
-    allow_cidrs: "{{ (onebox_lan_cidrs + openbao_pod_cidrs) | unique }}"
     lb_try_duration: 10s

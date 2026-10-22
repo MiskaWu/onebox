@@ -1,0 +1,8 @@
+---
+# Rocky / AlmaLinux / RHEL 9+
+_tailscale_package: "tailscale-{{ tailscale_version }}"
+_tailscale_repo_file: /etc/yum.repos.d/tailscale.repo
+_tailscale_key_file: /etc/pki/rpm-gpg/RPM-GPG-KEY-tailscale
+_tailscale_key_url: "{{ tailscale_repo_url }}/rhel/{{ tailscale_repo_el_major }}/repo.gpg"
+# What the upstream install script leaves behind (same name: overwritten, nothing to remove).
+_tailscale_foreign_repo_files: []

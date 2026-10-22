@@ -1,0 +1,11 @@
+# Managed by onebox (roles/gitlab) — edits are overwritten on the next converge.
+[Unit]
+Description=Scheduled GitLab backup
+
+[Timer]
+OnCalendar={{ gitlab_backup_schedule }}
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

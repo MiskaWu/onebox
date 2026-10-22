@@ -1,0 +1,50 @@
+# Managed by onebox (roles/gitlab) → systemd service gitlab.service. Edits are overwritten.
+[Unit]
+Description=GitLab ({{ gitlab_image }}:{{ gitlab_version }})
+Wants=network-online.target
+After=network-online.target
+# At boot, a data volume that failed to mount keeps GitLab down instead of letting it
+# initialise a fresh, empty instance in the directory underneath.
+RequiresMountsFor={{ _gitlab_unit_mounts | join(' ') }}
+
+[Container]
+Image={{ _gitlab_image_ref }}
+ContainerName=gitlab
+HostName={{ gitlab_hostname }}
+ShmSize={{ gitlab_shm_size }}
+# Web UI and API: loopback only, the edge proxy is the way in.
+PublishPort=127.0.0.1:{{ gitlab_http_port }}:{{ gitlab_http_port }}
+{% if gitlab_registry_enabled | bool %}
+# Container registry: loopback only, behind the edge as {{ gitlab_registry_hostname }}.
+PublishPort=127.0.0.1:{{ gitlab_registry_port }}:{{ gitlab_registry_port }}
+{% endif %}
+{% if gitlab_ssh_enabled | bool %}
+# Git over SSH on the host's address. This is the one non-loopback port of the platform:
+# DNAT, so INPUT firewall rules do not filter it; gitlab-shell accepts keys only.
+PublishPort={{ gitlab_ssh_bind_address }}:{{ gitlab_ssh_port }}:22
+{% endif %}
+# :Z gives the volumes a private SELinux label (no-op without SELinux).
+Volume={{ gitlab_data_root }}/config:/etc/gitlab:Z
+Volume={{ gitlab_data_root }}/data:/var/opt/gitlab:Z
+Volume={{ gitlab_data_root }}/logs:/var/log/gitlab:Z
+{% if gitlab_shared_dir | length > 0 %}
+# Nested inside /var/opt/gitlab: podman mounts the longer path last, so it overlays the
+# data volume. It hides (does not delete) whatever was in data/gitlab-rails/shared before.
+Volume={{ gitlab_shared_dir }}:/var/opt/gitlab/gitlab-rails/shared:Z
+{% endif %}
+{% if gitlab_backup_dir | length > 0 %}
+Volume={{ gitlab_backup_dir }}:/var/opt/gitlab/backups:Z
+{% endif %}
+# Time for PostgreSQL to shut down cleanly. (Quadlet's StopTimeout= key needs podman 5;
+# Ubuntu 24.04 ships 4.9, so the podman option is passed directly.)
+PodmanArgs=--stop-timeout={{ gitlab_stop_timeout }}
+
+[Service]
+Restart=always
+# Starting the container is quick once the image is present (the role pulls it first);
+# GitLab's own initialisation runs inside afterwards.
+TimeoutStartSec=300
+TimeoutStopSec={{ gitlab_stop_timeout | int + 30 }}
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,157 @@
+{#- Ruby single-quoted string literal: only \ and ' need escaping, and nothing inside is
+    interpolated (a "#{…}" in a value stays text). -#}
+{%- macro rb(value) -%}
+'{{ value | string | replace(_gitlab_bs, _gitlab_bs ~ _gitlab_bs) | replace("'", _gitlab_bs ~ "'") }}'
+{%- endmacro -%}
+{%- macro rb_list(values) -%}
+[{% for v in values %}{{ rb(v) }}{{ ', ' if not loop.last }}{% endfor %}]
+{%- endmacro -%}
+# Managed by onebox (roles/gitlab) — overwritten on every converge; change the inventory.
+# Mounted into the container as /etc/gitlab/gitlab.rb and applied by `gitlab-ctl reconfigure`.
+#
+# No secret appears in this file, so it can be reviewed with `make check` (--diff). Each
+# secret is a root-only file in /etc/gitlab/onebox-secrets/, read when reconfigure runs.
+onebox_secret = ->(name) { File.read("/etc/gitlab/onebox-secrets/#{name}").chomp }
+
+external_url {{ rb('https://' ~ gitlab_hostname) }}
+gitlab_rails['time_zone'] = {{ rb(gitlab_time_zone) }}
+
+## ── TLS ends at the edge ─────────────────────────────────────────────────────────────
+# The edge proxy terminates HTTPS and forwards plain HTTP to the bundled nginx. Without
+# these, an https external_url makes omnibus listen on 443 with its own certificate and
+# try Let's Encrypt from inside the container.
+letsencrypt['enable'] = false
+gitlab_rails['nginx']['listen_https'] = false
+gitlab_rails['nginx']['listen_port'] = {{ gitlab_http_port | int }}
+gitlab_rails['nginx']['proxy_set_headers'] = {
+  'X-Forwarded-Proto' => 'https',
+  'X-Forwarded-Ssl' => 'on'
+}
+# The client address: believe X-Forwarded-For from the edge only.
+gitlab_rails['nginx']['real_ip_trusted_addresses'] = {{ rb_list(gitlab_trusted_proxies) }}
+gitlab_rails['nginx']['real_ip_header'] = 'X-Forwarded-For'
+gitlab_rails['nginx']['real_ip_recursive'] = 'on'
+gitlab_rails['trusted_proxies'] = {{ rb_list(gitlab_trusted_proxies) }}
+
+## ── Git over SSH ─────────────────────────────────────────────────────────────────────
+{% if gitlab_ssh_enabled | bool %}
+# Shown in clone URLs; the port actually published is set in gitlab.container from the
+# same variable, so the two cannot disagree.
+gitlab_rails['gitlab_shell_ssh_port'] = {{ gitlab_ssh_port | int }}
+{% else %}
+# No SSH port is published (gitlab_ssh_enabled: false). To hide SSH clone URLs, set
+# Admin → Settings → General → Visibility and access controls → Enabled Git access
+# protocols to "Only HTTP(S)" (an application setting, not a gitlab.rb key).
+{% endif %}
+
+## ── Container registry ───────────────────────────────────────────────────────────────
+{% if gitlab_registry_enabled | bool %}
+registry_external_url {{ rb('https://' ~ gitlab_registry_hostname) }}
+registry['nginx']['listen_https'] = false
+registry['nginx']['listen_port'] = {{ gitlab_registry_port | int }}
+# No proxy_set_headers here on purpose: for an https registry_external_url omnibus already
+# sends X-Forwarded-Proto/-Ssl to the registry. Setting them by hand only overrides that.
+{% else %}
+registry['enable'] = false
+gitlab_rails['registry_enabled'] = false
+{% endif %}
+
+## ── Root account ─────────────────────────────────────────────────────────────────────
+# Read only when the database is first seeded; changing it later has no effect (use the
+# password reset operation in the README). Not written to /etc/gitlab/initial_root_password:
+# the value is already in secrets.yml.
+gitlab_rails['initial_root_password'] = onebox_secret.('root-password')
+gitlab_rails['store_initial_root_password'] = false
+
+## ── Single sign-on (OpenID Connect) ──────────────────────────────────────────────────
+{% if gitlab_oidc_enabled | bool %}
+gitlab_rails['omniauth_enabled'] = true
+gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+gitlab_rails['omniauth_block_auto_created_users'] = {{ gitlab_oidc_block_auto_created_users | bool | lower }}
+{% if gitlab_oidc_auto_sign_in | bool %}
+# Break-glass password sign-in: https://{{ gitlab_hostname }}/users/sign_in?auto_sign_in=false
+gitlab_rails['omniauth_auto_sign_in_with_provider'] = 'openid_connect'
+{% endif %}
+gitlab_rails['omniauth_providers'] = [
+  {
+    name: 'openid_connect',
+    label: {{ rb(gitlab_oidc_label) }},
+    args: {
+      name: 'openid_connect',
+      scope: {{ rb_list(gitlab_oidc_scopes) }},
+      response_type: 'code',
+      # Must equal the "issuer" of the provider's discovery document exactly (a trailing
+      # slash too), or every sign-in fails the token check.
+      issuer: {{ rb(onebox_oidc_issuer) }},
+      discovery: true,
+      client_auth_method: {{ rb(gitlab_oidc_client_auth_method) }},
+      uid_field: 'sub',
+      pkce: true,
+      client_options: {
+        identifier: onebox_secret.('oidc-client-id'),
+        secret: onebox_secret.('oidc-client-secret'),
+        redirect_uri: {{ rb(_gitlab_oidc_redirect_uri) }}
+      }
+    }
+  }
+]
+{% else %}
+# Not configured (onebox_oidc_issuer is empty or gitlab_oidc_enabled is false).
+{% endif %}
+
+## ── Mail ─────────────────────────────────────────────────────────────────────────────
+{% if gitlab_smtp_enabled | bool %}
+gitlab_rails['gitlab_email_enabled'] = true
+gitlab_rails['smtp_enable'] = true
+gitlab_rails['smtp_address'] = {{ rb(gitlab_smtp_host) }}
+gitlab_rails['smtp_port'] = {{ gitlab_smtp_port | int }}
+gitlab_rails['smtp_domain'] = {{ rb(gitlab_smtp_domain) }}
+{% if _gitlab_smtp_auth | bool %}
+gitlab_rails['smtp_authentication'] = {{ rb(gitlab_smtp_authentication) }}
+gitlab_rails['smtp_user_name'] = onebox_secret.('smtp-user')
+gitlab_rails['smtp_password'] = onebox_secret.('smtp-password')
+{% endif %}
+{% if gitlab_smtp_tls == 'tls' %}
+# Implicit TLS (usually 465): TLS from the first byte, no STARTTLS.
+gitlab_rails['smtp_tls'] = true
+gitlab_rails['smtp_enable_starttls_auto'] = false
+gitlab_rails['smtp_openssl_verify_mode'] = 'peer'
+{% elif gitlab_smtp_tls == 'starttls' %}
+# STARTTLS (usually 587): plain greeting, then upgrade. smtp_tls must stay false — the two
+# are exclusive, and both true hangs the connection.
+gitlab_rails['smtp_tls'] = false
+gitlab_rails['smtp_enable_starttls_auto'] = true
+gitlab_rails['smtp_openssl_verify_mode'] = 'peer'
+{% else %}
+gitlab_rails['smtp_tls'] = false
+gitlab_rails['smtp_enable_starttls_auto'] = false
+{% endif %}
+gitlab_rails['gitlab_email_from'] = {{ rb(gitlab_email_from) }}
+gitlab_rails['gitlab_email_reply_to'] = {{ rb(gitlab_email_reply_to) }}
+gitlab_rails['gitlab_email_display_name'] = {{ rb(gitlab_email_display_name) }}
+{% else %}
+# No relay configured. The omnibus fallback would be sendmail, which this image does not
+# contain — every mail would fail silently in the background. Off, explicitly.
+gitlab_rails['gitlab_email_enabled'] = false
+{% endif %}
+
+## ── Resources (shared host) ──────────────────────────────────────────────────────────
+puma['worker_processes'] = {{ gitlab_puma_workers | int }}
+sidekiq['concurrency'] = {{ gitlab_sidekiq_concurrency | int }}
+gitlab_kas['enable'] = {{ gitlab_kas_enabled | bool | lower }}
+{% if not gitlab_bundled_monitoring | bool %}
+# Bundled Prometheus, Alertmanager and exporters.
+prometheus_monitoring['enable'] = false
+{% endif %}
+{% if gitlab_malloc_conf | length > 0 %}
+gitlab_rails['env'] = { 'MALLOC_CONF' => {{ rb(gitlab_malloc_conf) }} }
+gitaly['env'] = { 'MALLOC_CONF' => {{ rb(gitlab_malloc_conf) }} }
+{% endif %}
+
+## ── Backups ──────────────────────────────────────────────────────────────────────────
+gitlab_rails['backup_keep_time'] = {{ gitlab_backup_keep_time | int }}
+{% if gitlab_rb_extra | length > 0 %}
+
+## ── Extra settings (gitlab_rb_extra) ─────────────────────────────────────────────────
+{{ gitlab_rb_extra }}
+{% endif %}
