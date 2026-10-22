@@ -34,7 +34,8 @@ make (humans) → deploy.sh (source of truth, bash only) → ansible-playbook si
   with `reverse_proxy 127.0.0.1:<port>` and **no `tls` block**. Nothing edits the main Caddyfile.
 - **Ports**: containers publish on `127.0.0.1` only. Firewall rules on INPUT do not protect
   published container ports or NodePorts (they are DNAT/FORWARD) — loopback binding is the
-  real protection. Exceptions (git-over-SSH, datastores for pods) must be explicit variables.
+  real protection. The rare exception (git-over-SSH on 22) is an explicit, default-off
+  variable. Pods reach datastores over the cluster ↔ data-network path (ADR 0012), not LAN ports.
 - **Containers**: rootful podman + Quadlet units in `/etc/containers/systemd/`. Generic
   services use `podman_quadlet`; only services with unusual needs ship their own unit template.
   The edge proxy and the CI runner are **not** containerised (see ADRs).
@@ -56,7 +57,7 @@ roles/<role>/
 - **Render mode** is how this repo is tested without a VM. In `tasks/render.yml` every path
   is prefixed with `{{ onebox_root }}` and ownership uses `{{ onebox_owner }}` /
   `{{ onebox_group }}` (they become `omit` in render mode). `tests/render.yml` runs every
-  role's `render.yml` against `tests/inventory` and the validators check the output.
+  role's `render.yml` for each scenario in `tests/scenarios/` and the validators check the output.
 - Templates must not read `ansible_facts` directly; use `onebox_*` variables (facts are not
   gathered in render mode). OS-specific values come from `roles/common/vars/<family>.yml`.
 - Tasks that only read state use `changed_when: false` and `check_mode: false`.
