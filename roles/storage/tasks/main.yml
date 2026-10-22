@@ -1,0 +1,4 @@
+---
+# TODO: implemented in a later step.
+- name: Write files
+  ansible.builtin.include_tasks: render.yml

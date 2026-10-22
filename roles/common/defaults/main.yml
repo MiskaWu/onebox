@@ -1,0 +1,24 @@
+---
+# ── Firewall ─────────────────────────────────────────────────────────────────────────
+# firewalld : managed here; other roles open their ports through tasks/firewall_open.yml
+# none      : leave the host firewall alone (cloud security groups, an external firewall)
+common_firewall_backend: firewalld
+
+# ── Admin SSH ────────────────────────────────────────────────────────────────────────
+# Port the host's own sshd listens on. Move it off 22 when 22 should belong to the Git
+# forge (git-over-SSH has no SNI, so one IP's port 22 serves exactly one of the two).
+# The move is lock-out safe: the new port is opened and verified to be served by sshd
+# before the old one is closed, and the old one stays open while you are connected on it.
+common_admin_ssh_port: 22
+# Restrict the admin port to these sources (firewalld rich rules). Empty = any source.
+common_admin_ssh_allowed_cidrs: []
+
+# ── Disk health (bare metal) ─────────────────────────────────────────────────────────
+common_smartd_enabled: false
+common_smartd_short_test: "S/../.././02"   # daily short self-test at 02:00
+common_smartd_long_test: "L/../../6/03"    # weekly long self-test, Saturday 03:00
+common_smartd_temp_warn: 50
+common_smartd_temp_crit: 60
+
+# Minimum podman: Quadlet with drop-ins and `[Network]` units.
+common_min_podman: "4.9"

@@ -1,0 +1,4 @@
+---
+# common has no secrets or cross-component requirements.
+- name: Nothing to check
+  ansible.builtin.meta: noop

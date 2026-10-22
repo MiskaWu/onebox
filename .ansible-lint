@@ -1,0 +1,15 @@
+---
+profile: production
+exclude_paths:
+  - .tools/
+  - .render/
+  - tests/scenarios/
+  - inventories/
+# ansible-core only (CLAUDE.md §1): firewalld, semanage and podman are driven through
+# command with explicit changed_when, never through Galaxy collections.
+skip_list:
+  - command-instead-of-module
+  - galaxy[no-changelog]
+  - meta-no-info
+  - role-name[path]
+  - var-naming[no-role-prefix]   # cross-role variables live in group_vars/all

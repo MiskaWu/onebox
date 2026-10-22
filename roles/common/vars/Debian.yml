@@ -1,0 +1,16 @@
+---
+# Debian 13+ / Ubuntu 24.04+
+common_packages:
+  - podman
+  - openssh-server
+  - curl
+  - git
+  - acl
+  - tar
+  - uidmap       # newuidmap/newgidmap for rootless podman (CI runner)
+  - passt        # pasta: rootless podman networking
+common_firewalld_packages: [firewalld]
+common_smartd_packages: [smartmontools]
+common_sshd_service: ssh
+common_smartd_service: smartmontools
+common_smartd_config: /etc/smartd.conf

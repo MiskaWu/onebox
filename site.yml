@@ -1,0 +1,175 @@
+---
+# onebox — one play per component, in dependency order.
+#
+# Every play is tagged with its component name, so `make <component>` (→ deploy.sh apply
+# --tags <component>) converges just that part. A component that is not listed in
+# onebox_components is skipped entirely (the `when:` on each role).
+#
+# Facts are gathered once, in the preflight play, and reused by every later play.
+
+- name: Preflight (component graph, OS support, required secrets)
+  hosts: onebox
+  become: true
+  gather_facts: true
+  roles:
+    - role: preflight
+      tags: [always]
+
+- name: Host baseline (packages, podman, firewall, admin sshd)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [common, baseline]
+  roles:
+    - role: common
+
+- name: Storage (data and backup mounts)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [storage]
+  roles:
+    - role: storage
+      when: "'storage' in onebox_components"
+
+- name: Operators (admin accounts, SSH keys, sudo)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [operators]
+  roles:
+    - role: operators
+      when: "'operators' in onebox_components"
+
+- name: Tailscale (remote access)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [tailscale]
+  roles:
+    - role: tailscale
+      when: "'tailscale' in onebox_components"
+
+- name: Edge proxy (TLS termination, reverse proxy, portal)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [edge]
+  roles:
+    - role: caddy_edge
+      when: "'edge' in onebox_components"
+
+- name: Datastores (Postgres, MySQL, Redis, NATS, etcd)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [datastores]
+  roles:
+    - role: datastores
+      when: "'datastores' in onebox_components"
+
+- name: OpenBao (secrets store)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [openbao]
+  roles:
+    - role: openbao
+      when: "'openbao' in onebox_components"
+    - role: caddy_vhost
+      vars:
+        caddy_vhost_name: openbao
+        caddy_vhost_entries: "{{ openbao_vhost_entries }}"
+      when: "'openbao' in onebox_components"
+
+- name: Casdoor (SSO / OIDC identity provider)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [casdoor]
+  roles:
+    - role: casdoor
+      when: "'casdoor' in onebox_components"
+    - role: caddy_vhost
+      vars:
+        caddy_vhost_name: casdoor
+        caddy_vhost_entries: "{{ casdoor_vhost_entries }}"
+      when: "'casdoor' in onebox_components"
+
+- name: GitLab (Git forge, container registry)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [gitlab]
+  roles:
+    - role: gitlab
+      when: "'gitlab' in onebox_components"
+    - role: caddy_vhost
+      vars:
+        caddy_vhost_name: gitlab
+        caddy_vhost_entries: "{{ gitlab_vhost_entries }}"
+      when: "'gitlab' in onebox_components"
+
+- name: GitLab Runner (shell executor + rootless podman)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [gitlab-runner]
+  roles:
+    - role: gitlab_runner
+      when: "'gitlab-runner' in onebox_components"
+
+- name: Kubernetes (k3s, single node)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [k3s]
+  roles:
+    - role: k3s
+      when: "'k3s' in onebox_components"
+
+- name: Cluster gateway (Traefik on loopback, Gateway API)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [k3s-gateway]
+  roles:
+    - role: k3s_gateway
+      when: "'k3s-gateway' in onebox_components"
+    - role: caddy_vhost
+      vars:
+        caddy_vhost_name: k3s-gateway
+        caddy_vhost_entries: "{{ k3s_gateway_vhost_entries }}"
+      when: "'k3s-gateway' in onebox_components"
+
+- name: External Secrets Operator (OpenBao → Kubernetes Secrets)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [external-secrets]
+  roles:
+    - role: external_secrets
+      when: "'external-secrets' in onebox_components"
+
+- name: Argo CD (GitOps control plane)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [argocd]
+  roles:
+    - role: argocd
+      when: "'argocd' in onebox_components"
+    - role: caddy_vhost
+      vars:
+        caddy_vhost_name: argocd
+        caddy_vhost_entries: "{{ argocd_vhost_entries }}"
+      when: "'argocd' in onebox_components"
+
+- name: Argo Rollouts (blue-green / canary)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [argo-rollouts]
+  roles:
+    - role: argo_rollouts
+      when: "'argo-rollouts' in onebox_components"

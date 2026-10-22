@@ -1,0 +1,15 @@
+---
+# Rocky / AlmaLinux / RHEL 9+
+common_packages:
+  - podman
+  - openssh-server
+  - curl
+  - git
+  - acl                           # become_user to an unprivileged account needs setfacl
+  - tar
+  - policycoreutils-python-utils  # semanage: label a non-22 sshd port under SELinux
+common_firewalld_packages: [firewalld]
+common_smartd_packages: [smartmontools]
+common_sshd_service: sshd
+common_smartd_service: smartd
+common_smartd_config: /etc/smartmontools/smartd.conf

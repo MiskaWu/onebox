@@ -1,0 +1,50 @@
+---
+# Render every enabled role's files under onebox_root without touching the host.
+#
+# Each role keeps its file-writing tasks in tasks/render.yml (see CLAUDE.md §3); this
+# playbook runs exactly those, with onebox_render_only=true so handlers stay quiet and
+# ownership is omitted. tests/run.sh then validates the output.
+#
+#   ansible-playbook -i tests/scenarios/<name> tests/render.yml -e onebox_root=/tmp/out
+
+- name: Render onebox files (no host changes)
+  hosts: onebox
+  connection: local
+  gather_facts: false
+  vars:
+    onebox_render_only: true
+    # component name → role name, where they differ
+    _component_role:
+      edge: caddy_edge
+    # components that publish a vhost through caddy_vhost
+    _vhost_components: [openbao, casdoor, gitlab, k3s-gateway, argocd]
+  tasks:
+    - name: Refuse to render into the live filesystem
+      ansible.builtin.assert:
+        that:
+          - onebox_root | length > 1
+          - onebox_root != '/'
+        fail_msg: "pass -e onebox_root=<scratch dir>"
+
+    - name: Render the host baseline
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: render.yml
+        public: true
+
+    - name: Render each enabled component
+      ansible.builtin.include_role:
+        name: "{{ _component_role[item] | default(item | replace('-', '_')) }}"
+        tasks_from: render.yml
+        public: true
+      loop: "{{ onebox_components }}"
+
+    - name: Render the vhost drop-ins
+      ansible.builtin.include_role:
+        name: caddy_vhost
+        tasks_from: render.yml
+      vars:
+        caddy_vhost_name: "{{ item }}"
+        caddy_vhost_entries: "{{ lookup('ansible.builtin.vars', item | replace('-', '_') ~ '_vhost_entries') }}"
+      loop: "{{ onebox_components | intersect(_vhost_components) }}"
+      when: "'edge' in onebox_components"

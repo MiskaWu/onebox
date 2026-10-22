@@ -1,0 +1,70 @@
+---
+- name: Load OS-family values
+  ansible.builtin.include_vars: "{{ onebox_os_family }}.yml"
+
+- name: Install base packages
+  ansible.builtin.package:
+    name: "{{ common_packages }}"
+    state: present
+
+- name: Read the podman version
+  ansible.builtin.command: podman --version
+  register: _common_podman_version
+  changed_when: false
+  check_mode: false
+
+- name: Assert podman is new enough for Quadlet
+  ansible.builtin.assert:
+    that:
+      - (_common_podman_version.stdout.split() | last) is version(common_min_podman, '>=')
+    fail_msg: >-
+      podman >= {{ common_min_podman }} is required for Quadlet units (found
+      {{ _common_podman_version.stdout }}); use a newer distribution release
+    quiet: true
+
+# Ubuntu 24.04+ starts sshd through ssh.socket; starting ssh.service directly would fight
+# the socket for the port. Detect it once; the handlers and this task follow it.
+- name: Detect socket-activated sshd
+  ansible.builtin.command: systemctl is-enabled ssh.socket
+  register: _common_ssh_socket_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Remember how sshd is started
+  ansible.builtin.set_fact:
+    _common_ssh_socket: "{{ _common_ssh_socket_state.stdout | trim == 'enabled' }}"
+
+- name: Enable sshd
+  ansible.builtin.systemd_service:
+    name: "{{ 'ssh.socket' if _common_ssh_socket else common_sshd_service }}"
+    enabled: true
+    state: started
+
+# ── Firewall ─────────────────────────────────────────────────────────────────────────
+- name: Configure firewalld
+  ansible.builtin.include_tasks: firewalld.yml
+  when: common_firewall_backend == 'firewalld'
+
+# ── Admin SSH port (lock-out safe) ───────────────────────────────────────────────────
+- name: Manage the admin sshd port
+  ansible.builtin.include_tasks: admin_ssh.yml
+
+# ── Disk health ──────────────────────────────────────────────────────────────────────
+- name: Install smartmontools
+  ansible.builtin.package:
+    name: "{{ common_smartd_packages }}"
+    state: present
+  when: common_smartd_enabled | bool
+
+- name: Write the remaining host files
+  ansible.builtin.include_tasks: render.yml
+  vars:
+    _common_ssh_manage: false   # admin_ssh.yml already wrote the sshd drop-in at the right moment
+
+- name: Enable smartd
+  ansible.builtin.systemd_service:
+    name: "{{ common_smartd_service }}"
+    enabled: true
+    state: started
+  when: common_smartd_enabled | bool

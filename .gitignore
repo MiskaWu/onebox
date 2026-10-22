@@ -1,0 +1,8 @@
+# Secrets never enter version control
+inventories/*/group_vars/onebox/secrets.yml
+*.vault-pass
+# Local tooling and test output
+.tools/
+.render/
+*.retry
+__pycache__/

@@ -1,0 +1,67 @@
+---
+# Reusable: open ports in firewalld. Other roles call
+#
+#   - ansible.builtin.include_role:
+#       name: common
+#       tasks_from: firewall_open.yml
+#     vars:
+#       common_fw_rules:
+#         - { port: 443, proto: tcp }                           # any source
+#         - { port: 2222, proto: tcp, sources: [10.0.0.0/8] }   # rich rules per source
+#
+# Ensure-present semantics only: rules a caller stops listing are not removed here.
+# Does nothing when common_firewall_backend is not firewalld.
+
+- name: Firewall rules (render nothing; runtime only)
+  when:
+    - common_firewall_backend == 'firewalld'
+    - not onebox_render_only | bool
+  block:
+    - name: Query ports open to any source
+      ansible.builtin.command: >-
+        firewall-cmd --permanent --query-port={{ item.port }}/{{ item.proto | default('tcp') }}
+      loop: "{{ common_fw_rules | rejectattr('sources', 'defined') | list
+                + common_fw_rules | selectattr('sources', 'defined') | selectattr('sources', 'equalto', []) | list }}"
+      register: _common_fw_query
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Open ports to any source
+      ansible.builtin.command: >-
+        firewall-cmd --permanent --add-port={{ item.item.port }}/{{ item.item.proto | default('tcp') }}
+      loop: "{{ _common_fw_query.results }}"
+      loop_control:
+        label: "{{ item.item.port }}/{{ item.item.proto | default('tcp') }}"
+      when: item.stdout | trim != 'yes'
+      changed_when: true
+      notify: Reload firewalld
+
+    - name: Query source-restricted rules
+      ansible.builtin.command: >-
+        firewall-cmd --permanent --query-rich-rule='{{ _rule }}'
+      vars:
+        _rule: >-
+          rule family="{{ 'ipv6' if ':' in item.1 else 'ipv4' }}" source address="{{ item.1 }}"
+          port port="{{ item.0.port }}" protocol="{{ item.0.proto | default('tcp') }}" accept
+      loop: "{{ common_fw_rules | selectattr('sources', 'defined') | subelements('sources') }}"
+      loop_control:
+        label: "{{ item.0.port }} ← {{ item.1 }}"
+      register: _common_fw_rich
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Add source-restricted rules
+      ansible.builtin.command: >-
+        firewall-cmd --permanent --add-rich-rule='{{ _rule }}'
+      vars:
+        _rule: >-
+          rule family="{{ 'ipv6' if ':' in item.item.1 else 'ipv4' }}" source address="{{ item.item.1 }}"
+          port port="{{ item.item.0.port }}" protocol="{{ item.item.0.proto | default('tcp') }}" accept
+      loop: "{{ _common_fw_rich.results }}"
+      loop_control:
+        label: "{{ item.item.0.port }} ← {{ item.item.1 }}"
+      when: item.stdout | trim != 'yes'
+      changed_when: true
+      notify: Reload firewalld

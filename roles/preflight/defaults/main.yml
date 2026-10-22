@@ -1,0 +1,8 @@
+---
+# Oldest releases the roles are written against. Older ones lack Quadlet features
+# (podman >= 4.9) or ship a too-old ansible-core.
+preflight_min_ansible: "2.16"
+preflight_supported:
+  RedHat: 9        # Rocky / AlmaLinux / RHEL 9 and 10
+  Debian: 13       # Debian 13 "trixie"
+  Ubuntu: 24       # Ubuntu 24.04 LTS and later (os_family Debian, distribution Ubuntu)

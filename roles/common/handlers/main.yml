@@ -1,0 +1,41 @@
+---
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  changed_when: true
+  when: not onebox_render_only | bool
+
+# "Restart sshd" has two implementations. Restart (not reload) so the listener set
+# changes; established sessions survive because sshd uses KillMode=process.
+# Ubuntu 24.04+ socket-activates sshd: a systemd generator turns the Port lines of
+# sshd_config into ssh.socket, so the socket is what must be regenerated and restarted.
+- name: Regenerate the sshd socket unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: Restart sshd
+  when:
+    - not onebox_render_only | bool
+    - _common_ssh_socket | default(false) | bool
+
+- name: Restart the sshd socket
+  ansible.builtin.systemd_service:
+    name: ssh.socket
+    state: restarted
+  listen: Restart sshd
+  when:
+    - not onebox_render_only | bool
+    - _common_ssh_socket | default(false) | bool
+
+- name: Restart the sshd service
+  ansible.builtin.systemd_service:
+    name: "{{ common_sshd_service }}"
+    state: restarted
+  listen: Restart sshd
+  when:
+    - not onebox_render_only | bool
+    - not _common_ssh_socket | default(false) | bool
+
+- name: Restart smartd
+  ansible.builtin.systemd_service:
+    name: "{{ common_smartd_service }}"
+    state: restarted
+  when: not onebox_render_only | bool

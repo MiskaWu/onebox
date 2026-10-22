@@ -1,0 +1,73 @@
+---
+# Platform-wide defaults. Loaded for every play in site.yml.
+#
+# Override anything here from `inventories/<env>/group_vars/onebox/*.yml` — that directory
+# has higher precedence than this file. Role-specific knobs live in each role's
+# `defaults/main.yml`; only variables that more than one role reads are defined here.
+
+# ── Environment ──────────────────────────────────────────────────────────────────────
+onebox_env: example
+# Every service gets `<name>.<onebox_domain>`. One wildcard DNS record
+# (`*.<onebox_domain>` → onebox_host_ip) covers all of them.
+onebox_domain: dev.example.com
+# Address clients use to reach the host (LAN or public). 192.0.2.0/24 is TEST-NET-1.
+onebox_host_ip: 192.0.2.10
+# Networks that count as "internal" for vhosts marked internal_only.
+onebox_lan_cidrs:
+  - 192.0.2.0/24
+# Contact address for ACME, Git forge notifications, etc.
+onebox_admin_email: admin@example.com
+
+# ── Components ───────────────────────────────────────────────────────────────────────
+# What this host runs. `common` always runs and is not listed. Valid names and their
+# dependencies are in onebox_component_requires below.
+onebox_components: []
+
+onebox_component_requires:
+  operators: []
+  storage: []
+  tailscale: []
+  edge: []
+  datastores: []
+  openbao: [edge]
+  casdoor: [edge]
+  gitlab: [edge]
+  gitlab-runner: []
+  k3s: []
+  k3s-gateway: [k3s, edge]
+  external-secrets: [k3s, openbao]
+  argocd: [k3s, k3s-gateway]
+  argo-rollouts: [k3s]
+
+# ── Hostnames read by more than one role ─────────────────────────────────────────────
+edge_portal_hostname: "{{ onebox_domain }}"
+gitlab_hostname: "gitlab.{{ onebox_domain }}"
+gitlab_registry_hostname: "registry.{{ onebox_domain }}"
+casdoor_hostname: "sso.{{ onebox_domain }}"
+openbao_hostname: "bao.{{ onebox_domain }}"
+argocd_hostname: "argocd.{{ onebox_domain }}"
+
+# ── Single sign-on ───────────────────────────────────────────────────────────────────
+# OIDC issuer the services trust. Defaults to the bundled Casdoor; point it at any OIDC
+# provider (Keycloak, Entra ID, Google Workspace, …) to run without the casdoor component.
+onebox_oidc_issuer: "{{ ('https://' ~ casdoor_hostname) if 'casdoor' in onebox_components else '' }}"
+
+# ── Shared runtime facts ─────────────────────────────────────────────────────────────
+# OS family drives package names and paths (roles/common/vars/<family>.yml). Read from
+# facts on a real host; render scenarios set it explicitly because facts are not gathered.
+onebox_os_family: "{{ ansible_facts['os_family'] | default('unknown') }}"
+# Private podman network the shared datastores and their client apps join.
+onebox_data_network: onebox-data
+onebox_data_subnet: 10.89.10.0/24
+# kubeconfig written by the k3s role and read by every role that talks to the cluster.
+k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+# Loopback port the in-cluster gateway listens on; the edge proxies cluster hostnames here.
+k3s_gateway_http_port: 31080
+
+# ── Render mode (tests) ──────────────────────────────────────────────────────────────
+# tests/render.yml sets onebox_render_only=true and onebox_root=<tmpdir>: every role's
+# tasks/render.yml then writes its files under that directory instead of the host.
+onebox_render_only: false
+onebox_root: ""
+onebox_owner: "{{ omit if onebox_render_only | bool else 'root' }}"
+onebox_group: "{{ omit if onebox_render_only | bool else 'root' }}"

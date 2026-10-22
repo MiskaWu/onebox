@@ -1,0 +1,7 @@
+# Managed by onebox (roles/common) — edits are overwritten on the next converge.
+# Admin sshd listen port(s). A second Port line only appears during a lock-out-safe move:
+# it keeps the port you are currently connected on until a session on the new port exists.
+Port {{ common_admin_ssh_port }}
+{% for port in _common_ssh_keep_ports | default([]) if (port | int) != (common_admin_ssh_port | int) %}
+Port {{ port }}
+{% endfor %}

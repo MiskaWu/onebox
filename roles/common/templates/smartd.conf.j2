@@ -1,0 +1,3 @@
+# Managed by onebox (roles/common) — edits are overwritten on the next converge.
+# Watch every disk: all attributes, self-tests on a schedule, temperature thresholds.
+DEVICESCAN -a -o on -S on -n standby,q -s ({{ common_smartd_short_test }}|{{ common_smartd_long_test }}) -W 4,{{ common_smartd_temp_warn }},{{ common_smartd_temp_crit }} -m root

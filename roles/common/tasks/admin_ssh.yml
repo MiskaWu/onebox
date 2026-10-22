@@ -1,0 +1,170 @@
+---
+# Move the host's admin sshd to common_admin_ssh_port without locking anyone out.
+#
+# The danger is the operator sitting on the very connection being moved. The order below
+# is deliberate — do not reorder:
+#   1. label the port for SELinux and open it in the firewall
+#   2. write the sshd drop-in (keeping every port someone is connected on right now)
+#   3. validate the config, restart, and prove sshd (not another process) listens
+#   4. only then close the old port — and only when nobody is connected on it
+# Any failure stops in a state where the old port still works.
+
+- name: Find the local ports of established sshd sessions
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      ss -Htnp state established | grep -E '"sshd' | awk '{print $3}' | sed 's/.*://' | sort -u
+    executable: /bin/bash
+  register: _common_ssh_live
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Keep a port when someone is connected on it and nobody has proven the new port works
+# by being connected on it. A session on the new port, or no SSH session at all (console,
+# first boot), means the old ports can go.
+- name: Decide which current ports must stay open for now
+  ansible.builtin.set_fact:
+    _common_ssh_keep_ports: >-
+      {{ [] if (common_admin_ssh_port | string) in _common_ssh_live.stdout_lines
+         else _common_ssh_live.stdout_lines | map('int') | list }}
+
+- name: Check whether another program holds the admin port
+  ansible.builtin.shell:
+    cmd: set -o pipefail; ss -Hltnp sport = :{{ common_admin_ssh_port }} || true
+    executable: /bin/bash
+  register: _common_ssh_holder
+  changed_when: false
+  check_mode: false
+
+- name: Assert the admin port is free or already sshd's
+  ansible.builtin.assert:
+    that:
+      - _common_ssh_holder.stdout | length == 0 or '"sshd' in _common_ssh_holder.stdout or 'systemd' in _common_ssh_holder.stdout
+    fail_msg: >-
+      Port {{ common_admin_ssh_port }} is held by a program that is not sshd (often a container
+      publishing git-over-SSH there). Free the port first; continuing would let the
+      "is the new port listening?" check pass for the wrong process.
+    quiet: true
+
+- name: Check that sshd reads its drop-in directory
+  ansible.builtin.command: grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config
+  register: _common_ssh_include
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert sshd includes /etc/ssh/sshd_config.d
+  ansible.builtin.assert:
+    that:
+      - _common_ssh_include.rc == 0
+    fail_msg: >-
+      /etc/ssh/sshd_config has no `Include /etc/ssh/sshd_config.d/*.conf` line, so the port
+      drop-in would be silently ignored. Restore that line at the top of sshd_config.
+    quiet: true
+
+- name: SELinux port label for a non-standard sshd port
+  when:
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+    - (common_admin_ssh_port | int) != 22
+  block:
+    - name: Check the SELinux label of the admin port
+      ansible.builtin.shell:
+        cmd: set -o pipefail; semanage port -l | grep -E '^ssh_port_t\s' | grep -qw {{ common_admin_ssh_port }}
+        executable: /bin/bash
+      register: _common_ssh_selinux
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Allow sshd to bind the admin port
+      ansible.builtin.command: semanage port -a -t ssh_port_t -p tcp {{ common_admin_ssh_port }}
+      register: _common_ssh_semanage
+      changed_when: true
+      # "already defined" (labelled for another type): modify instead of add
+      failed_when: _common_ssh_semanage.rc != 0 and 'already defined' not in _common_ssh_semanage.stderr
+      when: _common_ssh_selinux.rc != 0
+
+    - name: Relabel a port that belonged to another SELinux type
+      ansible.builtin.command: semanage port -m -t ssh_port_t -p tcp {{ common_admin_ssh_port }}
+      changed_when: true
+      when:
+        - _common_ssh_semanage is changed
+        - "'already defined' in _common_ssh_semanage.stderr | default('')"
+
+- name: Open the admin port to any source
+  ansible.builtin.include_tasks: firewall_open.yml
+  vars:
+    common_fw_rules:
+      - port: "{{ common_admin_ssh_port }}"
+        proto: tcp
+        sources: "{{ common_admin_ssh_allowed_cidrs }}"
+
+- name: Write the sshd port drop-in
+  ansible.builtin.template:
+    src: sshd-admin-port.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-onebox-admin-port.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart sshd
+
+- name: Validate the sshd configuration before restarting
+  ansible.builtin.command: sshd -t
+  changed_when: false
+  check_mode: false
+
+- name: Apply sshd and firewall changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Check that sshd itself listens on the admin port
+  ansible.builtin.shell:
+    cmd: set -o pipefail; ss -Hltnp sport = :{{ common_admin_ssh_port }} | grep -cE '"(sshd|systemd)' || true
+    executable: /bin/bash
+  register: _common_ssh_listen
+  changed_when: false
+  check_mode: false
+
+- name: Assert sshd listens on the admin port
+  ansible.builtin.assert:
+    that:
+      - (_common_ssh_listen.stdout | trim | int) > 0
+    fail_msg: >-
+      sshd is not listening on {{ common_admin_ssh_port }}. Keep your current session open —
+      the old port has not been closed. Look at: systemctl status {{ common_sshd_service }},
+      journalctl -u {{ common_sshd_service }} -n 50, ss -ltnp, and on SELinux hosts
+      semanage port -l | grep ssh_port_t.
+    quiet: true
+  when: not ansible_check_mode
+
+# Only after the new port is proven. When 22 is handed to a container (git-over-SSH) the
+# firewalld `ssh` service is meaningless anyway: published ports are DNAT and never hit
+# the INPUT chain the service rule lives in.
+- name: Close the old ssh service once nobody depends on it
+  when:
+    - common_firewall_backend == 'firewalld'
+    - (common_admin_ssh_port | int) != 22
+    - _common_ssh_keep_ports | length == 0
+  block:
+    - name: Query the firewalld ssh service
+      ansible.builtin.command: firewall-cmd --permanent --query-service=ssh
+      register: _common_fw_ssh_service
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Remove the firewalld ssh service
+      ansible.builtin.command: firewall-cmd --permanent --remove-service=ssh
+      changed_when: true
+      when: _common_fw_ssh_service.stdout | trim == 'yes'
+      notify: Reload firewalld
+
+- name: Explain the dual-port transition
+  ansible.builtin.debug:
+    msg:
+      - >-
+        sshd now listens on {{ common_admin_ssh_port }} and, for now, also on
+        {{ _common_ssh_keep_ports | join(', ') }} — you are connected there.
+      - "1. Open a second terminal: ssh -p {{ common_admin_ssh_port }} <you>@{{ onebox_host_ip }} and keep it open."
+      - "2. Run `sudo make common` again from that session: the old port is closed."
+  when: _common_ssh_keep_ports | reject('equalto', common_admin_ssh_port | int) | list | length > 0

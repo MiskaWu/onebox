@@ -1,0 +1,53 @@
+---
+# Runs before anything touches the host. Every task here is tagged `always` from site.yml,
+# so `make <component>` still validates — but only that component's own checks run, which
+# lets you converge one service while another one's secrets are still placeholders.
+
+- name: Assert the ansible-core version
+  ansible.builtin.assert:
+    that:
+      - ansible_version.full is version(preflight_min_ansible, '>=')
+    fail_msg: "ansible-core >= {{ preflight_min_ansible }} is required (found {{ ansible_version.full }})"
+    quiet: true
+
+- name: Assert every listed component exists
+  ansible.builtin.assert:
+    that:
+      - item in onebox_component_requires
+    fail_msg: >-
+      unknown component '{{ item }}' in onebox_components; valid names:
+      {{ onebox_component_requires.keys() | sort | join(', ') }}
+    quiet: true
+  loop: "{{ onebox_components }}"
+
+- name: Assert component dependencies are enabled
+  ansible.builtin.assert:
+    that:
+      - onebox_component_requires[item] | difference(onebox_components) | length == 0
+    fail_msg: >-
+      component '{{ item }}' needs {{ onebox_component_requires[item] | difference(onebox_components) | join(', ') }}
+      — add them to onebox_components
+    quiet: true
+  loop: "{{ onebox_components }}"
+
+- name: Assert the operating system is supported
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['RedHat', 'Debian']
+      - (ansible_facts['distribution_major_version'] | int) >= preflight_supported[_preflight_distro]
+    fail_msg: >-
+      {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is not supported;
+      supported: RHEL-family >= 9, Debian >= 13, Ubuntu >= 24.04
+    quiet: true
+  vars:
+    _preflight_distro: "{{ 'Ubuntu' if ansible_facts['distribution'] == 'Ubuntu' else ansible_facts['os_family'] }}"
+  when: not onebox_render_only | bool
+
+- name: Run each selected component's own checks
+  ansible.builtin.include_role:
+    name: "{{ {'edge': 'caddy_edge'}[item] | default(item | replace('-', '_')) }}"
+    tasks_from: preflight.yml
+    apply:
+      tags: [always]
+  loop: "{{ onebox_components }}"
+  when: ('all' in ansible_run_tags) or (item in ansible_run_tags)

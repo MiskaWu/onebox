@@ -1,0 +1,41 @@
+---
+# Environment configuration for the `example` environment.
+# Everything that differs between environments belongs in this directory; roles only carry
+# neutral defaults. Secrets go in secrets.yml next to this file (start from
+# ../../secrets.example.yml, never commit the real one).
+
+onebox_env: example
+onebox_domain: dev.example.com
+onebox_host_ip: 192.0.2.10
+onebox_lan_cidrs:
+  - 192.0.2.0/24
+onebox_admin_email: admin@example.com
+
+# Pick what this host runs. Remove what you do not need; preflight checks dependencies.
+onebox_components:
+  - operators
+  - edge
+  - datastores
+  - openbao
+  - casdoor
+  - gitlab
+  - gitlab-runner
+  - k3s
+  - k3s-gateway
+  - external-secrets
+  - argocd
+  - argo-rollouts
+
+# ── TLS (roles/caddy_edge) ───────────────────────────────────────────────────────────
+# acme_dns  : Let's Encrypt via DNS-01 — works for names that only resolve inside the LAN
+# acme_http : Let's Encrypt via HTTP-01/TLS-ALPN — host must be reachable from the internet
+# internal  : Caddy's own CA (labs, air-gapped sites; clients must trust the root)
+# files     : certificates you provide
+edge_tls_mode: acme_dns
+edge_dns_provider: route53
+
+# ── People (roles/operators) ─────────────────────────────────────────────────────────
+operators_admins:
+  - name: alice
+    ssh_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUseExampleKeyDoNotUse0 alice@laptop

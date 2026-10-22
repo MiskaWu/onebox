@@ -1,0 +1,27 @@
+---
+# Every component on a RHEL-family host, Caddy's internal CA, firewalld, admin sshd moved
+# off 22 so GitLab can own git-over-SSH.
+onebox_env: test
+onebox_os_family: RedHat
+onebox_domain: dev.example.test
+onebox_host_ip: 192.0.2.10
+onebox_lan_cidrs: [192.0.2.0/24]
+onebox_components:
+  - operators
+  - storage
+  - tailscale
+  - edge
+  - datastores
+  - openbao
+  - casdoor
+  - gitlab
+  - gitlab-runner
+  - k3s
+  - k3s-gateway
+  - external-secrets
+  - argocd
+  - argo-rollouts
+common_admin_ssh_port: 2222
+common_admin_ssh_allowed_cidrs: [192.0.2.0/24]
+common_smartd_enabled: true
+edge_tls_mode: internal

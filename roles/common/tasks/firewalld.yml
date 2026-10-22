@@ -1,0 +1,40 @@
+---
+- name: Install firewalld
+  ansible.builtin.package:
+    name: "{{ common_firewalld_packages }}"
+    state: present
+
+- name: Run firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: true
+    state: started
+
+# `firewall-cmd --reload` rebuilds the ruleset from the permanent config and drops the
+# runtime rules netavark added for container networks (e.g. their subnets in the trusted
+# zone). Long-lived connections survive on conntrack, so the symptom is sneaky: only NEW
+# outbound connections from containers fail ("no route to host", even DNS to the network
+# gateway). netavark ships a unit that listens for firewalld reloads and re-applies its
+# rules; distributions leave it disabled. Enabling it fixes every reload, including the one
+# this playbook's own handler triggers at the end of the run.
+- name: Look for netavark's firewalld reload hook
+  ansible.builtin.command: systemctl cat netavark-firewalld-reload.service
+  register: _common_netavark_hook
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Re-apply container network rules after every firewalld reload
+  ansible.builtin.systemd_service:
+    name: netavark-firewalld-reload.service
+    enabled: true
+    state: started
+  when: _common_netavark_hook.rc == 0
+
+- name: Warn that firewalld reloads will break container networking
+  ansible.builtin.debug:
+    msg: >-
+      netavark-firewalld-reload.service is not available on this release: after any
+      `firewall-cmd --reload`, run `podman network reload --all` (or restart the
+      containers) or new outbound connections from containers will fail.
+  when: _common_netavark_hook.rc != 0
