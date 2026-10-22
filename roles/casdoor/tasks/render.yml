@@ -1,3 +1,74 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Every file this role writes. main.yml includes it first; tests/render.yml runs it alone.
+# Container units are rendered here only in render mode — on a host podman_quadlet's main.yml
+# writes them (it restarts only when its own write changed a unit).
+
+- name: Casdoor directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item.path }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ casdoor_root }}", mode: "0755"}
+    - {path: "{{ _casdoor_conf_dir }}", mode: "0755"}
+    - {path: "{{ _casdoor_secrets_dir }}", mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Casdoor configuration (no secrets)
+  ansible.builtin.template:
+    src: app.conf.j2
+    dest: "{{ onebox_root }}{{ _casdoor_conf_dir }}/app.conf"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  notify: Restart casdoor
+
+# Owned by the container user so Casdoor can read it; the root-only parent keeps every other
+# host account out. Single-file bind mounts pin the inode they were started with: a rewritten
+# file is only seen after a restart, which the handler does.
+- name: Organisation, applications and providers (client secrets inside)
+  ansible.builtin.template:
+    src: init_data.json.j2
+    dest: "{{ onebox_root }}{{ _casdoor_secrets_dir }}/init_data.json"
+    owner: "{{ omit if onebox_render_only | bool else casdoor_container_uid }}"
+    group: "{{ onebox_group }}"
+    mode: "0400"
+  no_log: true
+  notify: Restart casdoor
+
+- name: Dedicated database files
+  when: not _casdoor_shared | bool
+  block:
+    - name: Private network for the dedicated database (no route out)
+      ansible.builtin.include_role:
+        name: podman_quadlet
+        tasks_from: network.yml
+      vars:
+        podman_quadlet_network_name: "{{ _casdoor_db_network }}"
+        podman_quadlet_network_internal: true
+
+    # Owned by the image's postgres user: a root-owned 0700 mount point locks it out.
+    - name: Dedicated database data directory
+      ansible.builtin.file:
+        path: "{{ onebox_root }}{{ casdoor_db_data_dir }}"
+        state: directory
+        owner: "{{ omit if onebox_render_only | bool else casdoor_db_uid }}"
+        group: "{{ onebox_group }}"
+        mode: "0700"
+
+- name: Dedicated database unit (render mode; main.yml converges it through podman_quadlet)
+  ansible.builtin.include_tasks: unit_db.yml
+  vars:
+    _casdoor_quadlet_tasks: render.yml
+  when:
+    - onebox_render_only | bool
+    - not _casdoor_shared | bool
+
+- name: Casdoor unit (render mode; main.yml converges it through podman_quadlet)
+  ansible.builtin.include_tasks: unit_app.yml
+  vars:
+    _casdoor_quadlet_tasks: render.yml
+  when: onebox_render_only | bool

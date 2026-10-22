@@ -1,3 +1,116 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Run by roles/preflight. Secrets appear only inside `that:` (printed as written, never
+# evaluated); loops run over variable NAMES.
+
+- name: Assert the database mode and its dependency
+  ansible.builtin.assert:
+    that:
+      - casdoor_db_mode in ['shared', 'dedicated']
+      - casdoor_db_mode == 'dedicated' or 'datastores' in onebox_components
+      - casdoor_db_mode == 'dedicated' or (datastores_postgres_enabled | default(true) | bool)
+      - casdoor_db_name is match('^[a-z_][a-z0-9_]{0,62}$')
+      - casdoor_db_user is match('^[a-z_][a-z0-9_]{0,31}$')
+    fail_msg: >-
+      casdoor_db_mode is '{{ casdoor_db_mode }}': 'shared' uses the datastores PostgreSQL and
+      needs the datastores component with datastores_postgres_enabled (add it, or set
+      casdoor_db_mode: dedicated for a database container of Casdoor's own); casdoor_db_name and
+      casdoor_db_user must be lowercase identifiers
+    quiet: true
+
+# Every user of the built-in organisation is a global administrator: a platform organisation
+# named built-in would hand admin rights to everybody who signs in.
+- name: Assert people live outside the built-in organisation
+  ansible.builtin.assert:
+    that:
+      - casdoor_organization != 'built-in'
+      - casdoor_organization is match('^[A-Za-z0-9][A-Za-z0-9_-]*$')
+    fail_msg: >-
+      casdoor_organization must not be 'built-in' (its users are global Casdoor administrators)
+      and may contain letters, digits, - and _
+    quiet: true
+
+- name: Assert the Casdoor secrets are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='') | length > 0
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: "secrets.yml: set {{ item }} (make secrets-gen KEY={{ item }})"
+    quiet: true
+  loop: "{{ ['casdoor_db_password', 'casdoor_admin_password'] }}"
+
+- name: Assert the admin password is usable
+  ansible.builtin.assert:
+    that:
+      - casdoor_admin_password | length >= 12
+      - casdoor_admin_password is not search('\s')
+    fail_msg: >-
+      casdoor_admin_password needs at least 12 characters and no whitespace (Casdoor rejects
+      blanks in passwords). It is applied once, when Casdoor first creates built-in/admin.
+    quiet: true
+
+- name: Assert every enabled client has its credentials
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='') | length > 0
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: >-
+      secrets.yml: set {{ item }} (make secrets-gen KEY={{ item }}). Casdoor registers the
+      application with exactly this value, and the service uses the same key.
+    quiet: true
+  loop: "{{ _casdoor_clients | map('regex_replace', '$', '_oidc_client_id') | list
+            + _casdoor_clients | map('regex_replace', '$', '_oidc_client_secret') | list }}"
+
+# Casdoor silently skips an application whose client ID another application already uses.
+- name: Assert the client IDs are distinct
+  ansible.builtin.assert:
+    that:
+      - _ids | unique | length == _ids | length
+    fail_msg: "two OIDC clients have the same <name>_oidc_client_id value: Casdoor would create only one of them"
+    quiet: true
+  vars:
+    _ids: "{{ lookup('ansible.builtin.vars', *(_casdoor_clients | map('regex_replace', '$', '_oidc_client_id')), wantlist=True) }}"
+
+- name: Assert the upstream identity providers are complete
+  ansible.builtin.assert:
+    that:
+      - item.name is defined and item.name is match('^[a-z0-9][a-z0-9-]*$')
+      - item.type is defined and item.type in _casdoor_idp_types
+      - item.client_id is defined and item.client_id | length > 0
+      - _casdoor_idp_types[item.type].required | reject('in', item.keys() | list) | list | length == 0
+      - item.type != 'azuread' or (item.tenant | default('') | lower) not in ['', 'common', 'organizations', 'consumers']
+    fail_msg: >-
+      casdoor_identity_providers entry '{{ item.name | default('?') }}': needs name ([a-z0-9-]),
+      type (one of {{ _casdoor_idp_types.keys() | join(', ') }}), client_id, and for its type:
+      {{ (_casdoor_idp_types[item.type].required | join(', ')) if item.type | default('') in _casdoor_idp_types else '?' }}.
+      An Entra ID tenant must be a real tenant ID — common/organizations/consumers admit any
+      Microsoft account.
+    quiet: true
+  loop: "{{ casdoor_identity_providers }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+- name: Assert the upstream client secrets are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='') | length > 0
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: "secrets.yml: set {{ item }} (make secrets-set KEY={{ item }}, the value the upstream provider issued)"
+    quiet: true
+  loop: >-
+    {{ casdoor_identity_providers | map(attribute='name', default='') | map('replace', '-', '_')
+       | map('regex_replace', '^(.*)$', 'casdoor_idp_\1_client_secret') | list }}
+
+# Internal-only is the identity provider's real boundary (ADR 0006, 0018). Opening it is
+# allowed, but only on purpose.
+- name: Assert the identity provider is public only on purpose
+  ansible.builtin.assert:
+    that:
+      - casdoor_allow_public | bool or (casdoor_vhost_entries
+        | map(attribute='internal_only', default=edge_internal_only_default) | reject | list | length == 0)
+    fail_msg: >-
+      a casdoor_vhost_entries entry is public (internal_only: false, or edge_internal_only_default
+      is false). Before exposing the identity
+      provider check that self sign-up is closed (it is, with this role), that
+      casdoor_admin_password is strong, and that someone owns the patch cadence — then set
+      casdoor_allow_public: true.
+    quiet: true

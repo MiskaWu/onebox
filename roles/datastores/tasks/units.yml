@@ -1,0 +1,53 @@
+---
+# One podman_quadlet call per engine and per Redis node. render.yml runs it with
+# podman_quadlet's render.yml (files only), main.yml with its main.yml (unit, podman secrets,
+# start/restart). Both read the same definitions (vars/main.yml).
+#
+# Distinct loop variables on purpose: podman_quadlet loops with `item` itself, and the vars
+# below are evaluated lazily inside it — an outer `item` would be shadowed there.
+
+- name: Engine container
+  ansible.builtin.include_role:
+    name: podman_quadlet
+    tasks_from: "{{ _datastores_quadlet_tasks }}"
+  vars:
+    podman_quadlet_name: "{{ _datastores_unit.name }}"
+    podman_quadlet_image: "{{ _datastores_unit.image }}"
+    podman_quadlet_publish: "{{ _datastores_unit.publish }}"
+    podman_quadlet_env: "{{ _datastores_unit.env }}"
+    # Superuser passwords become podman secrets (Secret=…,type=env), never Environment=.
+    podman_quadlet_secrets: >-
+      {{ {_datastores_unit.secret_env: lookup('ansible.builtin.vars', _datastores_unit.secret_var)}
+         if _datastores_unit.secret_var is defined else {} }}
+    podman_quadlet_volumes: "{{ _datastores_unit.volumes }}"
+    podman_quadlet_networks: ["{{ _datastores_network_unit }}"]
+    podman_quadlet_options: >-
+      {{ (['IP=' ~ _datastores_unit.ip] if _datastores_unit.ip | length > 0 else []) + _datastores_unit.options }}
+    podman_quadlet_timeout_start: "{{ _datastores_unit.timeout }}"
+  loop: "{{ _datastores_units }}"
+  loop_control:
+    loop_var: _datastores_unit
+    label: "{{ _datastores_unit.name }}"
+
+- name: Redis cluster node
+  ansible.builtin.include_role:
+    name: podman_quadlet
+    tasks_from: "{{ _datastores_quadlet_tasks }}"
+  vars:
+    podman_quadlet_name: "redis-{{ _redis_node }}"
+    podman_quadlet_image: "{{ datastores_redis_image }}"
+    # Both operands cast: a string port would turn 6379 + 1 into "63791" without an error.
+    podman_quadlet_publish: >-
+      {{ ['127.0.0.1:' ~ ((datastores_redis_port | int) + (_redis_node | int)) ~ ':6379']
+         if datastores_redis_publish_local | bool else [] }}
+    podman_quadlet_volumes:
+      - "{{ datastores_data_root }}/redis-{{ _redis_node }}:/data:Z"
+      - "{{ datastores_secrets_dir }}/redis-{{ _redis_node }}.conf:/etc/redis/redis.conf:ro,Z"
+      - "{{ _datastores_redis_tls_dir }}/redis-{{ _redis_node }}:/tls:ro,Z"
+    podman_quadlet_networks: ["{{ _datastores_network_unit }}"]
+    podman_quadlet_options: "{{ ['IP=' ~ datastores_redis_ips[_redis_node | int]] + _datastores_redis_options_common }}"
+    podman_quadlet_timeout_start: 120
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    loop_var: _redis_node
+    label: "redis-{{ _redis_node }}"

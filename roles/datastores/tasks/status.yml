@@ -1,0 +1,114 @@
+---
+# Read-only report of the datastores (for a `make datastores-status` target):
+#   - name: Datastores status
+#     hosts: onebox
+#     become: true
+#     gather_facts: false
+#     tasks:
+#       - ansible.builtin.include_role: {name: datastores, tasks_from: status.yml}
+# It asks each engine itself — a unit can be active while the Redis nodes never formed a
+# cluster — and says which checks it could not run instead of reporting them as fine.
+
+- name: Read the service states
+  ansible.builtin.command:
+    argv: "{{ ['systemctl', 'is-active'] + _units }}"
+  vars:
+    _units: >-
+      {{ (_datastores_units | map(attribute='name') | list
+          + _datastores_redis_nodes | map('string') | map('regex_replace', '^', 'redis-') | list)
+         | map('regex_replace', '$', '.service') | list }}
+  register: _datastores_status_units
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read the PostgreSQL databases and their owners
+  ansible.builtin.command:
+    argv: >-
+      {{ _datastores_psql + ['-tAc',
+         "SELECT d.datname || ' (owner ' || r.rolname || ')' FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba ORDER BY 1"] }}
+  register: _datastores_status_pg
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: datastores_postgres_enabled | bool
+
+# Who is connected from where: the only reliable answer to "is everyone using the tunnel or
+# the data network?" — a direct LAN connection keeps its source address.
+- name: Read the PostgreSQL client addresses
+  ansible.builtin.command:
+    argv: >-
+      {{ _datastores_psql + ['-tAc',
+         "SELECT usename || '@' || coalesce(host(client_addr), 'socket') || ' x' || count(*)
+          FROM pg_stat_activity WHERE backend_type = 'client backend'
+          GROUP BY usename, client_addr ORDER BY 1"] }}
+  register: _datastores_status_pg_clients
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: datastores_postgres_enabled | bool
+
+- name: Read the Redis cluster state
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - redis-0
+      - sh
+      - -c
+      - "{{ _datastores_redis_cli }} cluster info | grep -E '^cluster_(state|slots_assigned|known_nodes|size)'"
+  register: _datastores_status_redis
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: datastores_redis_enabled | bool
+
+- name: Read the etcd endpoint status
+  ansible.builtin.command:
+    argv: "{{ _datastores_etcdctl + ['endpoint', 'status', '-w', 'table'] }}"
+  register: _datastores_status_etcd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: datastores_etcd_enabled | bool
+
+- name: Read the NATS health endpoint
+  ansible.builtin.command:
+    argv: [podman, exec, nats, wget, -q, -O, -, http://127.0.0.1:8222/healthz]
+  register: _datastores_status_nats
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: datastores_nats_enabled | bool
+
+- name: Datastores status
+  ansible.builtin.debug:
+    msg: "{{ _lines | select | list }}"
+  vars:
+    # A probe that could not run says so ("UNREADABLE …"), it is never shown as empty.
+    _show: >-
+      {{ {'pg': _datastores_status_pg, 'redis': _datastores_status_redis,
+          'etcd': _datastores_status_etcd, 'nats': _datastores_status_nats} }}
+    _lines:
+      - >-
+        units: {{ _datastores_status_units.cmd[2:] | default([]) | zip(_datastores_status_units.stdout_lines | default([]))
+                  | map('join', '=') | join(' ') or 'none (systemctl gave no answer)' }}
+      - >-
+        {{ '' if not datastores_postgres_enabled | bool
+           else 'postgres databases: ' ~ (_show.pg.stdout_lines | join(', '))
+           if _show.pg.rc | default(1) == 0 else 'postgres: UNREADABLE ' ~ (_show.pg.stderr | default('') | trim) }}
+      - >-
+        {{ '' if not datastores_postgres_enabled | bool
+           else 'postgres clients: ' ~ (_datastores_status_pg_clients.stdout_lines | default([]) | join(', ') or 'none') }}
+      - >-
+        {{ '' if not datastores_redis_enabled | bool
+           else 'redis: ' ~ (_show.redis.stdout_lines | map('trim') | join(' '))
+           if _show.redis.rc | default(1) == 0 else 'redis: UNREADABLE ' ~ (_show.redis.stderr | default('') | trim) }}
+      - >-
+        {{ '' if not datastores_etcd_enabled | bool
+           else 'etcd: ' ~ _show.etcd.stdout
+           if _show.etcd.rc | default(1) == 0 else 'etcd: UNREADABLE ' ~ (_show.etcd.stderr | default('') | trim) }}
+      - >-
+        {{ '' if not datastores_nats_enabled | bool
+           else 'nats: ' ~ (_show.nats.stdout | trim) if _show.nats.rc | default(1) == 0 else 'nats: UNREADABLE' }}
+      - "{{ 'mysql: unit state only (this report does not query MySQL)' if datastores_mysql_enabled | bool else '' }}"

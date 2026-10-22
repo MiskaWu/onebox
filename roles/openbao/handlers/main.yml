@@ -1,0 +1,10 @@
+---
+# The configuration file is bind-mounted, not part of the unit: podman_quadlet cannot see it
+# change. Skipped in --check, where a first deployment's service does not exist yet.
+- name: Restart openbao
+  ansible.builtin.systemd_service:
+    name: openbao.service
+    state: restarted
+  when:
+    - not onebox_render_only | bool
+    - not ansible_check_mode

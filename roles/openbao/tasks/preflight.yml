@@ -1,3 +1,74 @@
 ---
-- name: No checks yet
-  ansible.builtin.meta: noop
+# Run by roles/preflight. Nothing here interpolates a secret value: secrets only appear inside
+# `that:`, which is printed as written, never evaluated.
+
+- name: Assert the seal passphrase is filled in and long enough
+  ansible.builtin.assert:
+    that:
+      - openbao_seal_key is defined
+      - openbao_seal_key is not match('CHANGE-ME')
+      - openbao_seal_key | length >= 32
+    fail_msg: >-
+      secrets.yml: set openbao_seal_key to a random string of at least 32 characters
+      (make secrets-gen KEY=openbao_seal_key LENGTH=48) and store a copy in your password
+      manager right away — losing it makes every secret and every backup unreadable.
+    quiet: true
+
+- name: Assert a rotation uses a different, valid previous key
+  ansible.builtin.assert:
+    that:
+      - openbao_seal_previous_key is not match('CHANGE-ME')
+      - openbao_seal_previous_key | length >= 32
+      - openbao_seal_previous_key != openbao_seal_key
+    fail_msg: >-
+      openbao_seal_previous_key is set, so a seal rotation is in progress: it must hold the
+      passphrase the store is sealed with now, and openbao_seal_key the new one (they differ)
+    quiet: true
+  when: openbao_seal_previous_key | length > 0
+
+- name: Assert the OIDC client credentials are filled in
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item, default='') | length > 0
+      - lookup('ansible.builtin.vars', item, default='CHANGE-ME') is not match('CHANGE-ME')
+    fail_msg: >-
+      secrets.yml: set {{ item }} ({{ 'make secrets-gen KEY=' ~ item ~ ' — Casdoor registers it'
+      if 'casdoor' in onebox_components else 'copy it from your identity provider' }}), or leave
+      onebox_oidc_issuer empty to run OpenBao without single sign-on
+    quiet: true
+  loop: [openbao_oidc_client_id, openbao_oidc_client_secret]
+  when: openbao_oidc_enabled | bool
+
+# Fail closed: with no administrators, the default role would admit anybody who can sign in
+# to the identity provider.
+- name: Assert the sign-in tiers are sound
+  ansible.builtin.assert:
+    that:
+      - openbao_oidc_admins | length > 0
+      - openbao_oidc_default_role in (_openbao_tiers | map(attribute='name') | list)
+      - openbao_oidc_bind_claim is match('^[A-Za-z_][A-Za-z0-9_.:-]*$')
+      - "'openbao' in onebox_oidc_clients"
+    fail_msg: >-
+      OpenBao sign-in needs at least one entry in openbao_oidc_admins (values of the
+      '{{ openbao_oidc_bind_claim }}' claim), openbao_oidc_default_role one of admin, writer,
+      reader, and an 'openbao' entry in onebox_oidc_clients (its redirect URIs)
+    quiet: true
+  when: openbao_oidc_enabled | bool
+
+# The default role must admit everybody who is allowed in at all; otherwise a reader who
+# leaves the Role field empty is refused with an error that does not say "type a role".
+- name: Assert the default tier covers every member
+  ansible.builtin.assert:
+    that:
+      - _uncovered | length == 0
+    fail_msg: >-
+      openbao_oidc_default_role is '{{ openbao_oidc_default_role }}', which does not include
+      {{ _uncovered | join(', ') }}. Use a lower tier as the default (reader includes everyone).
+    quiet: true
+  vars:
+    _all: "{{ _openbao_tiers | map(attribute='members') | flatten | unique }}"
+    _default: "{{ (_openbao_tiers | selectattr('name', 'equalto', openbao_oidc_default_role) | first).members }}"
+    _uncovered: "{{ _all | difference(_default) }}"
+  when:
+    - openbao_oidc_enabled | bool
+    - openbao_oidc_default_role in (_openbao_tiers | map(attribute='name') | list)

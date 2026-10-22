@@ -1,0 +1,37 @@
+---
+datastores_mysql_enabled: true
+datastores_nats_enabled: true
+datastores_nats_jetstream: true
+datastores_etcd_enabled: true
+datastores_postgres_publish_lan: true
+datastores_postgres_databases:
+  - name: app_dev
+    owner: app_dev
+    password_var: app_dev_db_password
+    createdb: true
+  - name: app_dev_log
+    owner: app_dev
+    password_var: app_dev_db_password
+datastores_mysql_databases:
+  - name: legacy_dev
+    owner: legacy_dev
+    password_var: legacy_dev_db_password
+
+openbao_oidc_admins: [alice@example.test]
+openbao_oidc_writers: [bob@example.test]
+openbao_oidc_default_role: writer
+
+casdoor_db_mode: shared
+casdoor_identity_providers:
+  - name: corp
+    type: oidc
+    display_name: Company SSO
+    client_id: onebox-test
+    issuer: https://idp.example.test/realms/main
+    auth_url: https://idp.example.test/realms/main/protocol/openid-connect/auth
+  - name: microsoft
+    type: azuread
+    display_name: Microsoft
+    client_id: 00000000-0000-0000-0000-000000000001
+    tenant: 00000000-0000-0000-0000-000000000002
+casdoor_password_form: false

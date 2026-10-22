@@ -1,4 +1,62 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Datastores: the data network, the engines, then the steps that need a running engine
+# (superuser password, application databases, Redis cluster creation, etcd auth).
+#
+# Everything after the containers is `command` and therefore skipped by --check: whether a
+# database exists or the cluster formed is only visible live (tasks/status.yml).
+
+- name: Read the podman version (Notify=healthy needs podman 5)
+  ansible.builtin.command: podman --version
+  register: _datastores_podman
+  changed_when: false
+  check_mode: false
+
+- name: Remember the podman version
+  ansible.builtin.set_fact:
+    _datastores_podman_version: "{{ _datastores_podman.stdout.split() | last }}"
+
+- name: Write the network, directories and configuration
   ansible.builtin.include_tasks: render.yml
+
+# The nodes refuse to start without their bus certificates (protected mode), so these come first.
+- name: Redis cluster bus certificates
+  ansible.builtin.include_tasks: redis_tls.yml
+  when:
+    - datastores_redis_enabled | bool
+    - not ansible_check_mode
+
+- name: Run the containers
+  ansible.builtin.include_tasks: units.yml
+  vars:
+    _datastores_quadlet_tasks: main.yml
+
+- name: Remove engines that were switched off
+  ansible.builtin.include_tasks: absent.yml
+
+# A changed configuration file restarts its engine now, before the steps below talk to it.
+- name: Apply configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: PostgreSQL superuser and application databases
+  ansible.builtin.include_tasks: postgres.yml
+  when:
+    - datastores_postgres_enabled | bool
+    - not ansible_check_mode
+
+- name: MySQL application databases
+  ansible.builtin.include_tasks: mysql.yml
+  when:
+    - datastores_mysql_enabled | bool
+    - not ansible_check_mode
+
+- name: Redis cluster
+  ansible.builtin.include_tasks: redis.yml
+  when:
+    - datastores_redis_enabled | bool
+    - not ansible_check_mode
+
+- name: Configure etcd authentication
+  ansible.builtin.include_tasks: etcd.yml
+  when:
+    - datastores_etcd_enabled | bool
+    - not ansible_check_mode

@@ -1,0 +1,15 @@
+---
+# Data layer on a RHEL-family host, every optional branch on: all five engines (MySQL,
+# NATS JetStream, etcd with auth), application databases, a LAN-published engine, Casdoor on
+# the shared PostgreSQL with upstream identity providers, OpenBao with single sign-on.
+onebox_env: test
+onebox_os_family: RedHat
+onebox_domain: data.example.test
+onebox_host_ip: 192.0.2.10
+onebox_lan_cidrs: [192.0.2.0/24]
+onebox_components:
+  - edge
+  - datastores
+  - openbao
+  - casdoor
+edge_tls_mode: internal

@@ -1,3 +1,39 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Every file this role writes. main.yml includes it first; tests/render.yml runs it alone.
+# The container unit is rendered here only in render mode — on a host podman_quadlet's
+# main.yml writes it (it restarts only when its own write changed the unit).
+
+- name: OpenBao directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ item.path }}"
+    state: directory
+    owner: "{{ omit if onebox_render_only | bool else item.uid }}"
+    group: "{{ omit if onebox_render_only | bool else item.gid }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ openbao_root }}", uid: 0, gid: 0, mode: "0755"}
+    - {path: "{{ _openbao_config_dir }}", uid: 0, gid: 0, mode: "0755"}
+    # The raft store belongs to the image's user: a root-owned directory makes the server
+    # crash-loop on its first write.
+    - {path: "{{ _openbao_data_dir }}", uid: "{{ openbao_container_uid }}", gid: "{{ openbao_container_gid }}", mode: "0700"}
+    # Root token and recovery key: root only, never mounted into the container.
+    - {path: "{{ _openbao_state_dir }}", uid: 0, gid: 0, mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
+
+# Mounted as a single file into the image's own /openbao/config, which stays owned by the
+# image user — the entrypoint would otherwise try (and fail) to chown a read-only mount.
+- name: Server configuration
+  ansible.builtin.template:
+    src: onebox.hcl.j2
+    dest: "{{ onebox_root }}{{ _openbao_config_dir }}/onebox.hcl"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0644"
+  notify: Restart openbao
+
+- name: Container unit (render mode; main.yml converges it through podman_quadlet)
+  ansible.builtin.include_tasks: unit.yml
+  vars:
+    _openbao_quadlet_tasks: render.yml
+  when: onebox_render_only | bool

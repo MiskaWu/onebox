@@ -1,0 +1,115 @@
+---
+# Certificates that authenticate the Redis cluster bus: a CA that signs nothing but these
+# nodes, and one key pair per node. Created once (EC P-256, ten years). openssl is driven with
+# argv and `creates`, so a converge never rotates them by accident; to renew, delete
+# {{ _datastores_redis_tls_dir }} and converge (every node restarts with the new set).
+# Redis checks the chain, not the name: a node certificate does not have to follow an address
+# change, but the subjectAltName records the address it was issued for.
+
+- name: Install openssl
+  ansible.builtin.package:
+    name: openssl
+    state: present
+
+- name: Create the cluster bus CA
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - ec
+      - -pkeyopt
+      - ec_paramgen_curve:P-256
+      - -nodes
+      - -days
+      - "3650"
+      - -subj
+      - /CN=onebox redis cluster bus CA
+      - -keyout
+      - "{{ _datastores_redis_tls_dir }}/ca.key"
+      - -out
+      - "{{ _datastores_redis_tls_dir }}/ca.crt"
+    creates: "{{ _datastores_redis_tls_dir }}/ca.crt"
+  notify: Restart redis nodes
+
+- name: Keep the CA key root-only
+  ansible.builtin.file:
+    path: "{{ _datastores_redis_tls_dir }}/ca.key"
+    owner: root
+    group: root
+    mode: "0400"
+
+- name: Issue the node certificates
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - ec
+      - -pkeyopt
+      - ec_paramgen_curve:P-256
+      - -nodes
+      - -days
+      - "3650"
+      - -subj
+      - "/CN=redis-{{ _redis_node }}"
+      - -addext
+      - "subjectAltName=IP:{{ datastores_redis_ips[_redis_node | int] }}"
+      - -addext
+      - basicConstraints=critical,CA:FALSE
+      - -addext
+      - extendedKeyUsage=serverAuth,clientAuth
+      - -CA
+      - "{{ _datastores_redis_tls_dir }}/ca.crt"
+      - -CAkey
+      - "{{ _datastores_redis_tls_dir }}/ca.key"
+      - -keyout
+      - "{{ _datastores_redis_tls_dir }}/redis-{{ _redis_node }}/node.key"
+      - -out
+      - "{{ _datastores_redis_tls_dir }}/redis-{{ _redis_node }}/node.crt"
+    creates: "{{ _datastores_redis_tls_dir }}/redis-{{ _redis_node }}/node.crt"
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    loop_var: _redis_node
+  notify: Restart redis nodes
+
+- name: Give each node its CA copy
+  ansible.builtin.copy:
+    src: "{{ _datastores_redis_tls_dir }}/ca.crt"
+    dest: "{{ _datastores_redis_tls_dir }}/redis-{{ _redis_node }}/ca.crt"
+    remote_src: true
+    owner: "{{ datastores_redis_uid }}"
+    group: root
+    mode: "0400"
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    loop_var: _redis_node
+  notify: Restart redis nodes
+
+- name: Make each node's key pair readable by that node only
+  ansible.builtin.file:
+    path: "{{ _datastores_redis_tls_dir }}/redis-{{ item.0 }}/{{ item.1 }}"
+    owner: "{{ datastores_redis_uid }}"
+    group: root
+    mode: "0400"
+  loop: "{{ _datastores_redis_nodes | product(['node.key', 'node.crt']) | list }}"
+  loop_control:
+    label: "redis-{{ item.0 }}/{{ item.1 }}"
+
+- name: Check that the node certificates stay valid for 90 more days
+  ansible.builtin.command:
+    argv: [openssl, x509, -checkend, "7776000", -noout, -in, "{{ _datastores_redis_tls_dir }}/redis-{{ item }}/node.crt"]
+  register: _datastores_redis_cert_end
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop: "{{ _datastores_redis_nodes }}"
+
+- name: Warn about expiring cluster bus certificates
+  ansible.builtin.debug:
+    msg: >-
+      A Redis cluster bus certificate expires within 90 days: delete {{ _datastores_redis_tls_dir }}
+      and converge to issue a new CA and node certificates.
+  when: _datastores_redis_cert_end.results | rejectattr('rc', 'equalto', 0) | list | length > 0

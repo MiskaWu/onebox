@@ -1,8 +1,8 @@
 ---
 # onebox — one play per component, in dependency order.
 #
-# k3s runs before OpenBao on purpose: OpenBao's Kubernetes auth needs the cluster to exist, so
-# a fresh host converges in one pass.
+# k3s and Casdoor run before OpenBao on purpose: OpenBao configures Kubernetes auth against the
+# cluster and OIDC sign-in against Casdoor, so a fresh host converges in one pass.
 #
 # Every play is tagged with its component name, so `make <component>` (→ deploy.sh apply
 # --tags <component>) converges just that part. A component that is not listed in
@@ -80,20 +80,6 @@
     - role: k3s
       when: "'k3s' in onebox_components"
 
-- name: OpenBao (secrets store)
-  hosts: onebox
-  become: true
-  gather_facts: false
-  tags: [openbao]
-  roles:
-    - role: openbao
-      when: "'openbao' in onebox_components"
-    - role: caddy_vhost
-      vars:
-        caddy_vhost_name: openbao
-        caddy_vhost_entries: "{{ openbao_vhost_entries }}"
-      when: "'openbao' in onebox_components"
-
 - name: Casdoor (SSO / OIDC identity provider)
   hosts: onebox
   become: true
@@ -107,6 +93,20 @@
         caddy_vhost_name: casdoor
         caddy_vhost_entries: "{{ casdoor_vhost_entries }}"
       when: "'casdoor' in onebox_components"
+
+- name: OpenBao (secrets store)
+  hosts: onebox
+  become: true
+  gather_facts: false
+  tags: [openbao]
+  roles:
+    - role: openbao
+      when: "'openbao' in onebox_components"
+    - role: caddy_vhost
+      vars:
+        caddy_vhost_name: openbao
+        caddy_vhost_entries: "{{ openbao_vhost_entries }}"
+      when: "'openbao' in onebox_components"
 
 - name: GitLab (Git forge, container registry)
   hosts: onebox

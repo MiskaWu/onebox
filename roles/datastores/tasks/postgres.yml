@@ -1,0 +1,126 @@
+---
+# PostgreSQL steps that need the running server.
+#
+# Two kinds of connection, chosen on purpose:
+#   - administration goes through the container's unix socket, which the image trusts for
+#     local users — no superuser password on any command line;
+#   - password checks connect to the container's own name (its data-network address), where
+#     pg_hba demands scram-sha-256. 127.0.0.1 inside the container is "trust" and would
+#     accept any password, so a check there proves nothing.
+# Passwords travel on stdin (`podman exec -i`), never in argv: argv shows up in `ps`.
+
+- name: Wait for PostgreSQL to accept TCP connections
+  ansible.builtin.command:
+    argv: [podman, exec, postgres, pg_isready, -h, 127.0.0.1, -U, "{{ _datastores_postgres_superuser }}"]
+  register: _datastores_pg_ready
+  until: _datastores_pg_ready.rc == 0
+  retries: 60
+  delay: 2
+  changed_when: false
+
+# The image applies POSTGRES_PASSWORD only when it initialises an empty data directory. A
+# rotated secret would otherwise leave the old password in the database and every client
+# holding the new one locked out.
+- name: Check the superuser password
+  ansible.builtin.command:
+    argv: [podman, exec, -i, postgres, sh, -c, 'PGPASSWORD="$(cat)" psql -h postgres -U postgres -d postgres -tAc "select 1"']
+    stdin: "{{ datastores_postgres_superuser_password }}"
+  register: _datastores_pg_superuser_login
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Set the superuser password
+  ansible.builtin.command:
+    argv: [podman, exec, -i, postgres, psql, -v, ON_ERROR_STOP=1, -U, "{{ _datastores_postgres_superuser }}", -d, postgres, -q]
+    stdin: >-
+      ALTER ROLE "{{ _datastores_postgres_superuser }}"
+      PASSWORD '{{ datastores_postgres_superuser_password | replace("'", "''") }}';
+  changed_when: true
+  no_log: true
+  when: _datastores_pg_superuser_login.rc != 0
+
+# ── Application databases ────────────────────────────────────────────────────────────
+# Loops run over the declarations, which hold variable NAMES only; values are looked up
+# inside no_log tasks.
+- name: Check the application roles' passwords
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - -i
+      - postgres
+      - sh
+      - -c
+      - 'PGPASSWORD="$(cat)" psql -h postgres -U "$1" -d postgres -tAc "select 1"'
+      - sh
+      - "{{ item.owner }}"
+    stdin: "{{ lookup('ansible.builtin.vars', item.password_var) }}"
+  loop: "{{ datastores_postgres_databases | unique(attribute='owner') }}"
+  loop_control:
+    label: "{{ item.owner }}"
+  register: _datastores_pg_role_login
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+# One statement creates or updates: a new role and a rotated password take the same path,
+# and "changed" means the login check above failed.
+- name: Create the application roles or set their passwords
+  ansible.builtin.command:
+    argv: [podman, exec, -i, postgres, psql, -v, ON_ERROR_STOP=1, -U, "{{ _datastores_postgres_superuser }}", -d, postgres, -q]
+    stdin: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ item.item.owner }}') THEN
+          CREATE ROLE "{{ item.item.owner }}" LOGIN;
+        END IF;
+      END
+      $$;
+      ALTER ROLE "{{ item.item.owner }}" WITH LOGIN
+        PASSWORD '{{ lookup('ansible.builtin.vars', item.item.password_var) | replace("'", "''") }}';
+  loop: "{{ _datastores_pg_role_login.results }}"
+  loop_control:
+    label: "{{ item.item.owner }}"
+  changed_when: true
+  no_log: true
+  when: item.rc != 0
+
+# Converged every run (cheap, no secret): a later `createdb: false` takes the privilege back.
+- name: Read the CREATEDB privilege of every role
+  ansible.builtin.command:
+    argv: "{{ _datastores_psql + ['-tAc', \"SELECT rolname || '=' || rolcreatedb::text FROM pg_roles\"] }}"
+  register: _datastores_pg_createdb
+  changed_when: false
+  when: datastores_postgres_databases | length > 0
+
+- name: Grant or revoke CREATEDB
+  ansible.builtin.command:
+    argv: >-
+      {{ _datastores_psql + ['-c', 'ALTER ROLE "' ~ item.owner ~ '" '
+         ~ ('CREATEDB' if item.owner in _datastores_pg_createdb_owners else 'NOCREATEDB')] }}
+  loop: "{{ datastores_postgres_databases | unique(attribute='owner') }}"
+  loop_control:
+    label: "{{ item.owner }} → {{ 'CREATEDB' if item.owner in _datastores_pg_createdb_owners else 'NOCREATEDB' }}"
+  changed_when: true
+  when: >-
+    (item.owner ~ '=' ~ ('true' if item.owner in _datastores_pg_createdb_owners else 'false'))
+    not in _datastores_pg_createdb.stdout_lines
+
+- name: List the existing databases
+  ansible.builtin.command:
+    argv: [podman, exec, postgres, psql, -U, "{{ _datastores_postgres_superuser }}", -d, postgres, -tAc, "SELECT datname FROM pg_database"]
+  register: _datastores_pg_dbs
+  changed_when: false
+  when: datastores_postgres_databases | length > 0
+
+# The owner owns the database, so it needs no per-object grants. CREATE DATABASE cannot run
+# inside a DO block or transaction, hence its own call.
+- name: Create the missing application databases
+  ansible.builtin.command:
+    argv: "{{ _datastores_psql + ['-c', 'CREATE DATABASE \"' ~ item.name ~ '\" OWNER \"' ~ item.owner ~ '\"'] }}"
+  loop: "{{ datastores_postgres_databases }}"
+  loop_control:
+    label: "{{ item.name }} (owner {{ item.owner }})"
+  changed_when: true
+  when: item.name not in _datastores_pg_dbs.stdout_lines

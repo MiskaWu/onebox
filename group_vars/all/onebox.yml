@@ -104,6 +104,9 @@ onebox_os_family: "{{ ansible_facts['os_family'] | default('unknown') }}"
 # Private podman network the shared datastores and their client apps join.
 onebox_data_network: onebox-data
 onebox_data_subnet: 10.89.10.0/24
+# podman's default bridge network: containers that join no named network (OpenBao, Casdoor's
+# app container, …) talk to the host from here.
+onebox_container_default_cidr: 10.88.0.0/16
 # ── Cluster contract (roles/k3s, read by every cluster role) ─────────────────────────
 k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
 # Must not overlap podman's networks (10.88.0.0/16 default, onebox_data_subnet) or the LAN.

@@ -1,4 +1,39 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# Casdoor: files → database (container in dedicated mode, role + database either way) →
+# Casdoor → checks against the live service. The database must exist before Casdoor's first
+# start: it does not create its database (createDatabase defaults to false) and exits.
+
+- name: Read the podman version (Notify=healthy needs podman 5)
+  ansible.builtin.command: podman --version
+  register: _casdoor_podman
+  changed_when: false
+  check_mode: false
+
+- name: Remember the podman version
+  ansible.builtin.set_fact:
+    _casdoor_podman_version: "{{ _casdoor_podman.stdout.split() | last }}"
+
+- name: Write the directories and the configuration
   ansible.builtin.include_tasks: render.yml
+
+- name: Run the dedicated database
+  ansible.builtin.include_tasks: unit_db.yml
+  vars:
+    _casdoor_quadlet_tasks: main.yml
+  when: not _casdoor_shared | bool
+
+- name: Create the database role and database
+  ansible.builtin.include_tasks: database.yml
+  when: not ansible_check_mode
+
+- name: Run Casdoor
+  ansible.builtin.include_tasks: unit_app.yml
+  vars:
+    _casdoor_quadlet_tasks: main.yml
+
+- name: Apply configuration changes (restart re-applies the init data)
+  ansible.builtin.meta: flush_handlers
+
+- name: Check the running service
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

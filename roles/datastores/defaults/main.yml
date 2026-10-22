@@ -1,1 +1,153 @@
 ---
+# Shared datastores on the private podman network {{ onebox_data_network }} (ADR 0011, 0012).
+# This role owns engines and superusers. Application databases are declared below (for
+# workloads that have no role of their own, e.g. Kubernetes apps) or created by the consuming
+# service's own role (casdoor does that). README.md explains the connection paths.
+
+# ── Engines ──────────────────────────────────────────────────────────────────────────
+# PostgreSQL is the default database. MySQL is an escape hatch for software that supports
+# nothing else. Turning an engine off stops converging it; it does not delete its data.
+datastores_postgres_enabled: true
+datastores_redis_enabled: true
+datastores_mysql_enabled: false
+datastores_nats_enabled: false
+datastores_etcd_enabled: false
+
+# ── Where state lives ────────────────────────────────────────────────────────────────
+# One 0700 directory per container, owned by the user the image runs as (the *_uid values
+# below). Host paths rather than named volumes: the `storage` component can put this tree on
+# its own disk or LV, and backups see plain directories. Quadlet adds RequiresMountsFor= for
+# every bind source, so if this path is a mount that failed, the engines stay down instead of
+# initialising empty databases on the root filesystem.
+datastores_data_root: /var/lib/onebox/datastores
+# Configuration files that carry passwords (Redis, NATS). The directory is root-only (0700);
+# each file is owned by its container's user with mode 0400 and bind-mounted read-only, so the
+# engine can read it while no other host account can reach it.
+datastores_secrets_dir: /etc/onebox/datastores
+
+# ── Reachability (ADR 0012) ──────────────────────────────────────────────────────────
+# Three paths, in order of preference:
+#   1. other containers join {{ onebox_data_network }} and use the container name
+#      (postgres:5432, mysql:3306, nats:4222, etcd:2379; Redis nodes by address, see below);
+#   2. host tools and SSH tunnels use 127.0.0.1 (*_publish_local);
+#   3. Kubernetes pods route to the fixed data-network address (*_ip) through a selectorless
+#      Service + EndpointSlice — no published port involved.
+# *_publish_lan binds the host's LAN address as well. It is an explicit exception, off by
+# default, because a published port is DNAT'd and never reaches the INPUT chain: firewalld
+# rules do not filter it and the whole LAN can connect (in clear text). README.md has the
+# details and the measurement that proved it.
+datastores_lan_address: "{{ onebox_host_ip }}"
+
+# Fixed addresses on the data network. The defaults are offsets 201+ inside
+# onebox_data_subnet, above the range podman hands out sequentially from .2. "" lets podman
+# pick (no EndpointSlice possible then). Changing an address recreates the container.
+
+# ── PostgreSQL ───────────────────────────────────────────────────────────────────────
+# 18.x. The image keeps PGDATA in a major-version subdirectory (/var/lib/postgresql/18/docker)
+# and refuses to start when something is mounted at the pre-18 path /var/lib/postgresql/data —
+# a loud failure, but the mount point must follow the major version (see vars/main.yml).
+datastores_postgres_image: "docker.io/library/postgres:18.6-alpine@sha256:83148c0bc09eac4d598b70a61e1404d0212b76c95c504bfd6c81a4c59ec91792"
+datastores_postgres_port: 5432
+datastores_postgres_publish_local: true
+datastores_postgres_publish_lan: false
+datastores_postgres_ip: "{{ _datastores_ip_at.postgres }}"
+datastores_postgres_uid: 70              # postgres user of the alpine image; re-check on image bumps
+# Parallel queries use /dev/shm; podman's 64m default makes them fail with "could not resize
+# shared memory segment".
+datastores_postgres_shm_size: 256m
+# Application databases, created idempotently (database, login role, ownership). The owner
+# owns the database, so no per-object grants are needed; tables are the application's job.
+#   - name: app_dev                      database ([a-z_][a-z0-9_]*)
+#     owner: app_dev                     login role, created when missing
+#     password_var: app_dev_db_password  secrets.yml KEY holding the role's password
+#     createdb: false                    let the role create databases itself (opt-in)
+# password_var holds a key name, never a value: loop items are printed by Ansible.
+datastores_postgres_databases: []
+
+# ── MySQL (escape hatch) ─────────────────────────────────────────────────────────────
+# The LTS line (`lts` tag), not the short-lived innovation releases.
+datastores_mysql_image: "docker.io/library/mysql:9.7.4@sha256:8fb11c38b3551e22d50adbb688f027f8ff4ea2d2445aa277c1cc97b4af85ec54"
+datastores_mysql_port: 3306
+datastores_mysql_publish_local: true
+datastores_mysql_publish_lan: false
+datastores_mysql_ip: "{{ _datastores_ip_at.mysql }}"
+datastores_mysql_uid: 999                # mysql user of the image; re-check on image bumps
+# Same shape as datastores_postgres_databases (createdb does not apply). The owner gets
+# ALL PRIVILEGES on its database only.
+datastores_mysql_databases: []
+
+# ── Redis (cluster, ADR 0011) ────────────────────────────────────────────────────────
+# One master per address, no replicas: no availability gain on one host, but protocol parity
+# with a real cluster (cluster-aware clients, hash tags, database 0 only). Cluster gossip and
+# MOVED redirects carry IP addresses, so every node needs a fixed one — clients (podman and
+# pods alike) connect to these addresses, not to container names. At least three.
+# Changing the list later does not reshard the cluster: README.md has the procedure.
+datastores_redis_image: "docker.io/library/redis:8.10.2-alpine@sha256:615b4cedaff0c1437a1548acae4222572df8c021eeb7382d64cb8b5e3a13ac7a"
+datastores_redis_ips:
+  - "{{ _datastores_ip_at.redis_0 }}"
+  - "{{ _datastores_ip_at.redis_1 }}"
+  - "{{ _datastores_ip_at.redis_2 }}"
+# Node n publishes 127.0.0.1:<port + n>. Host clients must follow MOVED redirects to the
+# data-network addresses (redis-cli -c), which the host can route to.
+datastores_redis_port: 6379
+datastores_redis_publish_local: true
+datastores_redis_uid: 999                # redis user of the alpine image; re-check on image bumps
+# Per node: the cluster may use up to n × this. noeviction makes a full node refuse writes
+# loudly; use allkeys-lru for a pure cache.
+datastores_redis_maxmemory: 512mb
+datastores_redis_maxmemory_policy: noeviction
+datastores_redis_cluster_node_timeout: 5000
+
+# ── NATS ─────────────────────────────────────────────────────────────────────────────
+datastores_nats_image: "docker.io/library/nats:2.14.8-alpine@sha256:85afd2041c88687ef65d5170a9e4cb16e5bc02d3b753d34aee14336db8720b3c"
+datastores_nats_port: 4222
+datastores_nats_publish_local: true
+datastores_nats_publish_lan: false
+datastores_nats_ip: "{{ _datastores_ip_at.nats }}"
+datastores_nats_user: onebox             # client user; its password is a secret
+# JetStream persistence. Its limits exist only in the configuration file (there are no
+# command-line flags for them); without limits it would claim most of the host's memory and
+# disk, which this host shares with everything else.
+datastores_nats_jetstream: false
+datastores_nats_jetstream_max_memory: 256MB
+datastores_nats_jetstream_max_file: 4GB
+
+# ── etcd ─────────────────────────────────────────────────────────────────────────────
+# 3.6 line: 3.7 changed the storage engine and its early patches carry .0-style risk; 3.6 has
+# the fix for acknowledged writes lost after a single-node crash and is supported upstream.
+datastores_etcd_image: "quay.io/coreos/etcd:v3.6.15@sha256:7cf6622cb09b111289eed8a0cce3478e4f01d5048b0e0a1ed208299f3419334d"
+datastores_etcd_port: 2379
+datastores_etcd_publish_local: true
+datastores_etcd_publish_lan: false
+datastores_etcd_ip: "{{ _datastores_ip_at.etcd }}"
+# Role-based access with a root user. Turning it off later disables auth on the next converge
+# (the root user stays, so turning it on again just re-enables). Some client libraries cannot
+# authenticate at all; that is the only reason to switch it off.
+datastores_etcd_auth_enabled: true
+# Compact history older than this; without it the keyspace history grows until the backend
+# quota alarm makes etcd read-only.
+datastores_etcd_auto_compaction_retention: 1h
+
+# ── Health ───────────────────────────────────────────────────────────────────────────
+# Quadlet `Notify=healthy` (the unit counts as started once the health check passes, so
+# dependants such as casdoor start against a database that accepts connections) needs
+# podman >= 5.0; Ubuntu 24.04 ships 4.9. auto = decide from `podman --version` on the host.
+datastores_notify_healthy: auto
+
+# ── Reset (tasks/reset.yml; preview unless confirmed) ────────────────────────────────
+# Protect lists, not delete lists (ADR 0009): a reset wipes every application database and all
+# Redis, etcd and NATS data, except what is listed here. Declared application databases are
+# recreated empty afterwards.
+datastores_reset_confirm: false
+datastores_reset_protect_postgres:
+  - postgres
+  - template0
+  - template1
+  # The identity provider's users, organisations and applications: wiping them locks every
+  # person out of every service. Platform data, not application state.
+  - "{{ casdoor_db_name | default('casdoor') }}"
+datastores_reset_protect_mysql:
+  - information_schema
+  - mysql
+  - performance_schema
+  - sys

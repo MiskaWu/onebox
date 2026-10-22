@@ -1,0 +1,137 @@
+---
+# Runtime configuration through the HTTP API on loopback. Every call that carries the root
+# token uses no_log; the root token is read from its root-only file, never from inventory.
+
+# /v1/sys/health answers with its status code: 200 unsealed, 501 not initialised, 503 sealed.
+- name: Wait for the API
+  ansible.builtin.uri:
+    url: "{{ _openbao_api }}/v1/sys/health"
+    status_code: [200, 429, 472, 473, 501, 503]
+  register: _openbao_health
+  until: _openbao_health.status in [200, 501, 503]
+  retries: 30
+  delay: 2
+
+# With auto-unseal, "sealed" after a start means the key does not open this store — usually
+# openbao_seal_key changed without a rotation. Stop instead of carrying on against it.
+- name: Fail when the store stays sealed
+  ansible.builtin.fail:
+    msg: >-
+      OpenBao is sealed: openbao_seal_key does not open the existing store. If you changed the
+      key, put the old passphrase back (or rotate: old value in openbao_seal_previous_key, new
+      one in openbao_seal_key). Do NOT delete {{ _openbao_data_dir }} — that destroys every
+      secret. Logs: journalctl -u openbao -n 50.
+  when: _openbao_health.status == 503
+
+# ── First start only: initialise ─────────────────────────────────────────────────────
+# Auto-unseal produces a recovery key (it can mint a new root token, it cannot decrypt) and a
+# root token. The output goes straight from the container into a root-only file — never
+# through Ansible's output — and is split below.
+- name: Initialise OpenBao (first start only)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      umask 077
+      podman exec openbao bao operator init -format=json -recovery-shares=1 -recovery-threshold=1 \
+        > {{ _openbao_state_dir }}/init.json.tmp
+    executable: /bin/bash
+  changed_when: true
+  when: _openbao_health.status == 501
+
+- name: Look for an initialisation output to split
+  ansible.builtin.stat:
+    path: "{{ _openbao_state_dir }}/init.json.tmp"
+  register: _openbao_init_tmp
+
+- name: Split the initialisation output
+  when: _openbao_init_tmp.stat.exists
+  block:
+    - name: Read the initialisation output
+      ansible.builtin.slurp:
+        src: "{{ _openbao_state_dir }}/init.json.tmp"
+      register: _openbao_init_raw
+      no_log: true
+
+    - name: Store the root token
+      ansible.builtin.copy:
+        content: "{{ (_openbao_init_raw.content | b64decode | from_json).root_token }}"
+        dest: "{{ _openbao_root_token_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Store the recovery key (move it offline, then delete this file)
+      ansible.builtin.copy:
+        content: >-
+          {{ {'recovery_keys_b64': (_openbao_init_raw.content | b64decode | from_json).recovery_keys_b64,
+              'note': 'Not a decryption key: it authorises minting a new root token (bao operator generate-root).'}
+             | to_nice_json }}
+        dest: "{{ _openbao_recovery_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Remove the unsplit initialisation output
+      ansible.builtin.file:
+        path: "{{ _openbao_state_dir }}/init.json.tmp"
+        state: absent
+
+- name: Look for the root token
+  ansible.builtin.stat:
+    path: "{{ _openbao_root_token_file }}"
+  register: _openbao_token_stat
+
+- name: Fail when the store is initialised but the root token is gone
+  ansible.builtin.fail:
+    msg: >-
+      OpenBao is initialised but {{ _openbao_root_token_file }} is missing, so nothing can be
+      configured. Do not wipe the data directory. Mint a new root token with the recovery key
+      (podman exec -it openbao bao operator generate-root -init, then -recovery-key per prompt),
+      write it to that file (root, 0600) and converge again.
+  when: not _openbao_token_stat.stat.exists
+
+- name: Wait until the new store has unsealed itself
+  ansible.builtin.uri:
+    url: "{{ _openbao_api }}/v1/sys/health"
+    status_code: [200, 429, 472, 473, 501, 503]
+  register: _openbao_health_after
+  until: _openbao_health_after.status == 200
+  retries: 30
+  delay: 2
+
+- name: Look for a recovery key still on this host
+  ansible.builtin.stat:
+    path: "{{ _openbao_recovery_file }}"
+  register: _openbao_recovery_stat
+
+- name: Remind to move the recovery key offline
+  ansible.builtin.debug:
+    msg: >-
+      {{ _openbao_recovery_file }} still holds the OpenBao recovery key. Copy it into your
+      password manager (sudo cat it once), then delete it: `sudo rm {{ _openbao_recovery_file }}`.
+      Keep openbao_seal_key there too — without it neither the store nor its backups can be opened.
+  when: _openbao_recovery_stat.stat.exists
+
+- name: Read the root token
+  ansible.builtin.slurp:
+    src: "{{ _openbao_root_token_file }}"
+  register: _openbao_token_raw
+  no_log: true
+
+- name: Configure through the API
+  vars:
+    _openbao_headers:
+      X-Vault-Token: "{{ _openbao_token_raw.content | b64decode | trim }}"
+  block:
+    - name: Mounts and policies
+      ansible.builtin.include_tasks: secrets_engine.yml
+
+    - name: OIDC sign-in
+      ansible.builtin.include_tasks: oidc.yml
+      when: openbao_oidc_enabled | bool
+
+    - name: Kubernetes auth for External Secrets
+      ansible.builtin.include_tasks: kubernetes_auth.yml
+      when: _openbao_k8s_enabled | bool

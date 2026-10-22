@@ -1,0 +1,24 @@
+---
+# Dedicated mode: Casdoor's own PostgreSQL on the internal casdoor-db network, publishing
+# nothing. POSTGRES_DB/USER make the image create the database and owner on first start.
+- name: Dedicated database container
+  ansible.builtin.include_role:
+    name: podman_quadlet
+    tasks_from: "{{ _casdoor_quadlet_tasks }}"
+  vars:
+    podman_quadlet_name: casdoor-db
+    podman_quadlet_image: "{{ casdoor_db_image }}"
+    podman_quadlet_publish: []
+    podman_quadlet_env:
+      POSTGRES_USER: "{{ casdoor_db_user }}"
+      POSTGRES_DB: "{{ casdoor_db_name }}"
+    podman_quadlet_secrets:
+      POSTGRES_PASSWORD: "{{ casdoor_db_password }}"
+    podman_quadlet_volumes:
+      - "{{ casdoor_db_data_dir }}:/var/lib/postgresql:Z"
+    podman_quadlet_networks: ["{{ _casdoor_db_network }}.network"]
+    podman_quadlet_options: >-
+      {{ ['HealthCmd=pg_isready -h 127.0.0.1 -U ' ~ casdoor_db_user,
+          'HealthInterval=10s', 'HealthTimeout=5s', 'HealthRetries=5', 'HealthStartPeriod=60s']
+         + (['Notify=healthy'] if _casdoor_notify | bool else []) }}
+    podman_quadlet_timeout_start: 300

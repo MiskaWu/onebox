@@ -31,6 +31,8 @@ its own database, the host runs many copies with separate upgrades, backups and 
   (one host); it buys protocol parity: applications use cluster-aware clients, hash tags and
   database 0 from day one, so moving to a real or managed cluster changes nothing in the app.
   Cluster gossip carries IP addresses, so nodes get fixed IPs and the network a fixed subnet.
+  The cluster bus itself is unauthenticated (Redis warns about it) and pods can reach the data
+  network, so the bus runs over TLS with a role-generated CA and protected mode on.
   Cluster creation is guarded by `cluster_known_nodes > 1`, not `cluster_state:ok`: a degraded
   cluster reports `fail`, and re-running creation would hit "node is not empty".
 - **Resets follow the protect-list pattern** ([0009](0009-guarded-irreversible-changes.md)): all

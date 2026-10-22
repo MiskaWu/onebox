@@ -1,0 +1,50 @@
+---
+# Engines switched off after they ran: stop the container and remove its unit and podman
+# secrets, so "off" in the inventory means off on the host. Data directories stay — deleting
+# data is a separate, deliberate step (ADR 0009: revoking and deleting are different commands).
+# Redis nodes are only removed all together (engine off); shrinking a running cluster needs
+# its slots moved first (README.md).
+
+- name: Find units of engines that are switched off
+  ansible.builtin.find:
+    paths: "{{ podman_quadlet_dir | default('/etc/containers/systemd') }}"
+    patterns: "{{ _datastores_absent_patterns }}"
+  register: _datastores_absent_units
+  # An empty pattern list would make find match every file in the directory.
+  when: _datastores_absent_patterns | length > 0
+
+- name: Stop the containers of engines that are switched off
+  ansible.builtin.systemd_service:
+    name: "{{ item.path | basename | regex_replace('\\.container$', '.service') }}"
+    state: stopped
+  loop: "{{ _datastores_absent_units.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not ansible_check_mode
+
+- name: Remove their units
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _datastores_absent_units.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: _datastores_absent_removed
+
+# A task, not a handler: the removed services must be gone before anything below runs.
+- name: Let Quadlet drop the generated services  # noqa: no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _datastores_absent_removed is changed
+
+- name: Remove their podman secrets
+  ansible.builtin.shell:
+    cmd: podman secret exists {{ item }} && podman secret rm {{ item }}
+    executable: /bin/bash
+  register: _datastores_absent_secret
+  changed_when: _datastores_absent_secret.rc == 0
+  failed_when: false
+  loop: >-
+    {{ (['postgres-postgres-password'] if not datastores_postgres_enabled | bool else [])
+       + (['mysql-mysql-root-password'] if not datastores_mysql_enabled | bool else []) }}
+  when: not ansible_check_mode

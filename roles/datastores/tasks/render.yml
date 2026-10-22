@@ -1,3 +1,119 @@
 ---
-- name: Nothing to render yet
-  ansible.builtin.meta: noop
+# Every file this role writes: the data network, directories, configuration files. main.yml
+# includes this first; tests/render.yml runs it alone with onebox_render_only=true. The
+# container units are rendered here only in render mode — on a host, main.yml hands them to
+# podman_quadlet's main.yml, which must be the one to write them (it restarts a container
+# only when its own write changed the unit).
+
+- name: Data network unit
+  ansible.builtin.include_role:
+    name: podman_quadlet
+    tasks_from: network.yml
+  vars:
+    podman_quadlet_network_name: "{{ onebox_data_network }}"
+    podman_quadlet_network_subnet: "{{ onebox_data_subnet }}"
+
+- name: Data root
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ datastores_data_root }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0755"
+
+# Root-only: nobody but root can reach the password files inside, whatever their owner.
+- name: Directory for configuration files that carry passwords
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ datastores_secrets_dir }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+
+# Owned by the user each image runs as. A root-owned 0700 mount point would let the
+# entrypoint create the data directory and then lock the engine out of its parent.
+- name: Engine data directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ datastores_data_root }}/{{ item.path }}"
+    state: directory
+    owner: "{{ omit if onebox_render_only | bool else item.uid }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+  loop: "{{ _datastores_data_dirs }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Redis node data directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ datastores_data_root }}/redis-{{ _redis_node }}"
+    state: directory
+    owner: "{{ omit if onebox_render_only | bool else datastores_redis_uid }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    loop_var: _redis_node
+
+# Cluster bus certificates (tasks/redis_tls.yml creates them on a host): the CA key stays in
+# the root-only parent, each node's directory holds only its own key and certificate.
+- name: Redis cluster bus certificate directory
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _datastores_redis_tls_dir }}"
+    state: directory
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0700"
+  when: datastores_redis_enabled | bool
+
+- name: Redis node certificate directories
+  ansible.builtin.file:
+    path: "{{ onebox_root }}{{ _datastores_redis_tls_dir }}/redis-{{ _redis_node }}"
+    state: directory
+    owner: "{{ omit if onebox_render_only | bool else datastores_redis_uid }}"
+    group: "{{ onebox_group }}"
+    mode: "0500"
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    loop_var: _redis_node
+
+- name: Redis node configuration (password inside)
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: "{{ onebox_root }}{{ datastores_secrets_dir }}/redis-{{ _redis_node }}.conf"
+    owner: "{{ omit if onebox_render_only | bool else datastores_redis_uid }}"
+    group: "{{ onebox_group }}"
+    mode: "0400"
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    loop_var: _redis_node
+  no_log: true
+  notify: Restart redis nodes
+
+- name: NATS configuration (password inside)
+  ansible.builtin.template:
+    src: nats.conf.j2
+    dest: "{{ onebox_root }}{{ datastores_secrets_dir }}/nats.conf"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0400"
+  no_log: true
+  notify: Restart nats
+  when: datastores_nats_enabled | bool
+
+# etcdctl reads ETCDCTL_USER=root:<password> from this file (`podman exec --env-file`), so
+# administrative calls never carry the password as an argument or through Ansible.
+- name: Write the etcd root credentials for administrative calls
+  ansible.builtin.copy:
+    content: "ETCDCTL_USER=root:{{ datastores_etcd_root_password }}\n"
+    dest: "{{ onebox_root }}{{ datastores_secrets_dir }}/etcd-root.env"
+    owner: "{{ onebox_owner }}"
+    group: "{{ onebox_group }}"
+    mode: "0400"
+  no_log: true
+  when: datastores_etcd_enabled | bool
+
+- name: Container units (render mode; main.yml converges them through podman_quadlet)
+  ansible.builtin.include_tasks: units.yml
+  vars:
+    _datastores_quadlet_tasks: render.yml
+  when: onebox_render_only | bool

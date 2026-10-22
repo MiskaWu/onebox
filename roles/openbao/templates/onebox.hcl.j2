@@ -1,0 +1,54 @@
+{# No secret in here: the seal keys arrive as podman secrets (env://), so this file is 0644 and
+   `make check` can show its real diff. #}
+# Managed by onebox (roles/openbao) — edits are overwritten on the next converge.
+# Mounted read-only at /openbao/config/onebox.hcl; the image starts `bao server -config=/openbao/config`.
+
+ui = true
+log_level = "{{ openbao_log_level }}"
+
+# The container has no IPC_LOCK; integrated storage recommends disabling mlock anyway (its
+# data is memory-mapped). With swap on the host, memory pages may be swapped to disk.
+disable_mlock = true
+
+# Address clients are sent to (UI links, OIDC redirects): the edge hostname, never loopback.
+api_addr = "https://{{ openbao_hostname }}"
+# Raft needs a cluster address even with one node; nothing outside the container uses it.
+cluster_addr = "http://127.0.0.1:8201"
+
+listener "tcp" {
+  # The real boundary is the loopback-only published port (and the edge in front of it).
+  address         = "0.0.0.0:8200"
+  cluster_address = "0.0.0.0:8201"
+  # TLS ends at the edge; this hop is loopback on the same host.
+  tls_disable     = true
+}
+
+# Integrated (raft) storage: snapshots through the API for backups, and a path to more nodes.
+# `file` was removed in 2.7.
+storage "raft" {
+  path    = "/openbao/data"
+  node_id = "onebox"
+}
+
+# Static auto-unseal (README.md: why, what it costs, how to rotate).
+seal "static" {
+  current_key_id = "{{ _openbao_seal_key_id }}"
+  current_key    = "env://BAO_SEAL_KEY"
+{% if openbao_seal_previous_key | length > 0 %}
+  # Rotation in progress: the store is still wrapped with this key; the server re-wraps it
+  # with current_key on start. Remove openbao_seal_previous_key afterwards.
+  previous_key_id = "{{ _openbao_seal_previous_key_id }}"
+  previous_key    = "env://BAO_SEAL_PREVIOUS_KEY"
+{% endif %}
+}
+{% if openbao_audit_stdout | bool %}
+
+# Audit log to stdout → the journal. Values are HMAC'd, not stored in clear. 2.7 only accepts
+# audit devices from configuration, not through the API.
+audit "file" "stdout" {
+  description = "onebox: audit log to the journal"
+  options {
+    file_path = "stdout"
+  }
+}
+{% endif %}

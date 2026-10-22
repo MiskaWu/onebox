@@ -1,0 +1,117 @@
+---
+# Human sign-in through the platform's OIDC issuer, one role per tier. Requires the issuer
+# to be up: with the bundled Casdoor, whose play runs after this one, the very first
+# converge of a new host skips this file with a note, and the next `make openbao` completes it.
+
+- name: Read the enabled auth methods
+  ansible.builtin.uri:
+    url: "{{ _openbao_api }}/v1/sys/auth"
+    headers: "{{ _openbao_headers }}"
+  register: _openbao_auths
+  no_log: true
+
+- name: Enable the OIDC auth method
+  ansible.builtin.uri:
+    url: "{{ _openbao_api }}/v1/sys/auth/{{ _openbao_oidc_mount }}"
+    method: POST
+    headers: "{{ _openbao_headers }}"
+    body_format: json
+    body:
+      type: oidc
+      description: Sign-in through {{ onebox_oidc_issuer }}
+    status_code: [200, 204]
+  changed_when: true
+  no_log: true
+  when: (_openbao_oidc_mount ~ '/') not in _openbao_auths.json.data
+
+# Probed from the host, certificate not checked: this only asks "is the issuer up yet?".
+# Whether OpenBao itself trusts and reaches it is decided by the configuration write below,
+# which fails loudly (and that failure is a real misconfiguration).
+- name: Probe the issuer's discovery document
+  ansible.builtin.uri:
+    url: "{{ onebox_oidc_issuer }}/.well-known/openid-configuration"
+    validate_certs: false
+    status_code: [200]
+  register: _openbao_issuer_probe
+  failed_when: false
+
+- name: Note that sign-in waits for the issuer
+  ansible.builtin.debug:
+    msg: >-
+      {{ onebox_oidc_issuer }} does not answer yet (status {{ _openbao_issuer_probe.status | default('none') }}),
+      so OIDC sign-in is not configured in this run. Run `make openbao` again once the issuer is up.
+  when: _openbao_issuer_probe.status | default(0) != 200
+
+- name: Configure OIDC sign-in
+  when: _openbao_issuer_probe.status | default(0) == 200
+  block:
+    - name: Read the issuer's CA
+      ansible.builtin.slurp:
+        src: "{{ openbao_oidc_ca_file }}"
+      register: _openbao_oidc_ca
+      when:
+        - openbao_oidc_ca_pem | length == 0
+        - openbao_oidc_ca_file | length > 0
+
+    # The server validates the issuer on write: it fetches the discovery document from inside
+    # the container. Failing here usually means a private CA (set openbao_oidc_ca_pem) or the
+    # issuer's vhost refusing the container's address (podman's network must be allowed there).
+    # A missing CA file fails the read above, loudly: that is a misconfiguration, not a wait.
+    # Written every run (declarative; the response does not reveal the stored secret to compare).
+    - name: Point OIDC at the issuer
+      ansible.builtin.uri:
+        url: "{{ _openbao_api }}/v1/auth/{{ _openbao_oidc_mount }}/config"
+        method: POST
+        headers: "{{ _openbao_headers }}"
+        body_format: json
+        body: >-
+          {{ {'oidc_discovery_url': onebox_oidc_issuer,
+              'oidc_client_id': openbao_oidc_client_id,
+              'oidc_client_secret': openbao_oidc_client_secret,
+              'default_role': openbao_oidc_default_role}
+             | combine({'oidc_discovery_ca_pem': _ca} if _ca | length > 0 else {}) }}
+      vars:
+        _ca: >-
+          {{ openbao_oidc_ca_pem if openbao_oidc_ca_pem | length > 0
+             else (_openbao_oidc_ca.content | default('') | b64decode) }}
+        status_code: [200, 204]
+      changed_when: false
+      no_log: true
+
+    # bound_claims is built as one expression: Ansible templates dict values but not dict
+    # keys, so `"{{ claim }}": [...]` would send the literal braces as the claim name — a role
+    # that matches nobody and fails closed without any error.
+    - name: Write the tier roles
+      ansible.builtin.uri:
+        url: "{{ _openbao_api }}/v1/auth/{{ _openbao_oidc_mount }}/role/{{ item.name }}"
+        method: POST
+        headers: "{{ _openbao_headers }}"
+        body_format: json
+        body:
+          role_type: oidc
+          user_claim: "{{ openbao_oidc_user_claim }}"
+          oidc_scopes: "{{ openbao_oidc_scopes }}"
+          bound_claims: "{{ {openbao_oidc_bind_claim: item.members} }}"
+          allowed_redirect_uris: "{{ _openbao_oidc_redirect_uris }}"
+          token_policies: ["{{ item.policy }}"]
+          token_ttl: "{{ openbao_oidc_token_ttl }}"
+        status_code: [200, 204]
+      loop: "{{ _openbao_tiers | selectattr('members') | list }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.members | length }})"
+      changed_when: false
+      no_log: true
+
+    # Declarative means "empty list = tier does not exist": a role left behind with its old
+    # bound_claims would keep admitting the people just removed.
+    - name: Delete the roles of empty tiers
+      ansible.builtin.uri:
+        url: "{{ _openbao_api }}/v1/auth/{{ _openbao_oidc_mount }}/role/{{ item.name }}"
+        method: DELETE
+        headers: "{{ _openbao_headers }}"
+        status_code: [200, 204, 404]
+      loop: "{{ _openbao_tiers | rejectattr('members') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      no_log: true

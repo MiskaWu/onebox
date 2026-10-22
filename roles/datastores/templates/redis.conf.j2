@@ -1,0 +1,36 @@
+{# Contains the Redis password: rendered with no_log, mode 0400, owner = the image's redis user. #}
+# Managed by onebox (roles/datastores) — Redis cluster node redis-{{ _redis_node }}.
+# Mounted read-only at /etc/redis/redis.conf. Carries the password, which is why it is a file
+# and not command-line flags (those show up in `ps` and in the world-readable unit).
+bind 0.0.0.0
+port 6379
+dir /data
+appendonly yes
+
+cluster-enabled yes
+# nodes.conf is per node and lives with the data; it is how a node remembers the cluster.
+cluster-config-file /data/nodes.conf
+cluster-node-timeout {{ datastores_redis_cluster_node_timeout }}
+# Gossip and MOVED redirects carry this address: it must be the fixed data-network address,
+# reachable from every client (podman containers, the host, Kubernetes pods).
+cluster-announce-ip {{ datastores_redis_ips[_redis_node | int] }}
+
+# The cluster bus (port 16379) has no authentication of its own: any host that reaches it can
+# MEET the cluster and have its gossip trusted — and pods route to the data network. TLS with a
+# CA that only signs these nodes is what authenticates it; protected mode makes the node refuse
+# to start should the bus ever be left unauthenticated. Clients keep the plain port 6379.
+tls-cluster yes
+tls-cert-file /tls/node.crt
+tls-key-file /tls/node.key
+tls-ca-cert-file /tls/ca.crt
+cluster-bus-port-protected-mode yes
+
+# Per node. Without a limit Redis grows until the kernel OOM-kills it.
+maxmemory {{ datastores_redis_maxmemory }}
+maxmemory-policy {{ datastores_redis_maxmemory_policy }}
+
+# One password for clients and for node-to-node links. Unquoted on purpose: preflight limits it
+# to URL-safe characters, so operational commands can read it back from this file inside the
+# container (REDISCLI_AUTH) and no password ever passes through Ansible's command lines.
+requirepass {{ datastores_redis_password }}
+masterauth {{ datastores_redis_password }}

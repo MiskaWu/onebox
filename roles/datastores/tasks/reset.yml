@@ -1,0 +1,158 @@
+---
+# Wipe all application data in every enabled engine, keeping only what the protect lists name
+# (ADR 0009, 0011). Preview by default; destructive only with datastores_reset_confirm=true.
+# For a `make datastores-reset` / `make datastores-reset-confirm` pair:
+#   - name: Reset datastores
+#     hosts: onebox
+#     become: true
+#     gather_facts: false
+#     tasks:
+#       - ansible.builtin.include_role: {name: datastores, tasks_from: reset.yml}
+#   (the -confirm target adds -e datastores_reset_confirm=true)
+#
+# All engines go together: an application's state spans them, and a cache or registry that
+# points at deleted rows is harder to reason about than everything dirty. Protect lists
+# rather than delete lists: anything new is wiped by default; only named things survive.
+
+# ── Detect (read-only, also under --check, so the preview tells the truth) ──────────
+- name: List the PostgreSQL databases
+  ansible.builtin.command:
+    argv: "{{ _datastores_psql + ['-tAc', 'SELECT datname FROM pg_database ORDER BY 1'] }}"
+  register: _datastores_reset_pg
+  changed_when: false
+  check_mode: false
+  when: datastores_postgres_enabled | bool
+
+- name: List the MySQL databases
+  ansible.builtin.command:
+    argv: [podman, exec, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root -N -e "SHOW DATABASES"']
+  register: _datastores_reset_mysql
+  changed_when: false
+  check_mode: false
+  when: datastores_mysql_enabled | bool
+
+- name: Count the keys on every Redis node
+  ansible.builtin.command:
+    argv: [podman, exec, "redis-{{ item }}", sh, -c, "{{ _datastores_redis_cli }} dbsize"]
+  register: _datastores_reset_redis
+  changed_when: false
+  check_mode: false
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    label: "redis-{{ item }}"
+
+- name: Count the etcd keys
+  ansible.builtin.command:
+    argv: "{{ _datastores_etcdctl + ['get', '', '--prefix', '--keys-only'] }}"
+  register: _datastores_reset_etcd
+  changed_when: false
+  check_mode: false
+  when: datastores_etcd_enabled | bool
+
+- name: Work out what would be wiped
+  ansible.builtin.set_fact:
+    _datastores_reset_pg_doomed: >-
+      {{ (_datastores_reset_pg.stdout_lines | default([]) | map('trim') | select | list)
+         | difference(datastores_reset_protect_postgres) }}
+    _datastores_reset_mysql_doomed: >-
+      {{ (_datastores_reset_mysql.stdout_lines | default([]) | map('trim') | select | list)
+         | difference(datastores_reset_protect_mysql) }}
+
+- name: Preview
+  ansible.builtin.debug:
+    msg:
+      - "{{ 'RESETTING' if datastores_reset_confirm | bool else 'PREVIEW — nothing is changed' }}"
+      - >-
+        postgres: drop {{ _datastores_reset_pg_doomed | join(', ') or 'nothing' }};
+        keep {{ datastores_reset_protect_postgres | join(', ') }}
+      - >-
+        postgres: recreate empty {{ datastores_postgres_databases | map(attribute='name') | join(', ') or 'nothing' }}
+      - >-
+        mysql: drop {{ _datastores_reset_mysql_doomed | join(', ') or 'nothing' }};
+        recreate empty {{ datastores_mysql_databases | map(attribute='name') | join(', ') or 'nothing' }}
+      - >-
+        redis: FLUSHALL on every node; keys now
+        {{ _datastores_reset_redis.results | default([]) | map(attribute='stdout', default='?') | map('trim') | join(' / ') or 'n/a' }}
+      - >-
+        etcd: delete every key;
+        {{ (_datastores_reset_etcd.stdout_lines | default([]) | select | list | length) if datastores_etcd_enabled | bool else 'n/a' }} now
+      - >-
+        nats: {{ 'n/a' if not datastores_nats_enabled | bool
+                 else 'restart and wipe the JetStream store' if datastores_nats_jetstream | bool
+                 else 'restart (drops subscriptions; core NATS keeps no state)' }}
+      - "{{ '' if datastores_reset_confirm | bool else 'Run the confirm variant to do this.' }}"
+
+# ── Destroy (only when confirmed) ────────────────────────────────────────────────────
+- name: Wipe the application data
+  when:
+    - datastores_reset_confirm | bool
+    - not ansible_check_mode
+  block:
+    # WITH (FORCE) disconnects sessions first: a crash-looping application reconnects
+    # constantly, so a plain DROP would almost always hit "database is being accessed".
+    - name: Drop the PostgreSQL application databases
+      ansible.builtin.command:
+        argv: "{{ _datastores_psql + ['-c', 'DROP DATABASE IF EXISTS \"' ~ item ~ '\" WITH (FORCE)'] }}"
+      loop: "{{ _datastores_reset_pg_doomed }}"
+      changed_when: true
+
+    - name: Recreate the declared PostgreSQL databases
+      ansible.builtin.include_tasks: postgres.yml
+      when: datastores_postgres_enabled | bool
+
+    - name: Drop the MySQL application databases
+      ansible.builtin.command:
+        argv: [podman, exec, -i, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root']
+        stdin: "DROP DATABASE IF EXISTS `{{ item }}`;"
+      loop: "{{ _datastores_reset_mysql_doomed }}"
+      changed_when: true
+
+    - name: Recreate the declared MySQL databases
+      ansible.builtin.include_tasks: mysql.yml
+      when: datastores_mysql_enabled | bool
+
+    # In a cluster each master only holds its own slots: every node needs its own FLUSHALL.
+    - name: Flush every Redis node
+      ansible.builtin.command:
+        argv: [podman, exec, "redis-{{ item }}", sh, -c, "{{ _datastores_redis_cli }} flushall"]
+      loop: "{{ _datastores_redis_nodes }}"
+      loop_control:
+        label: "redis-{{ item }}"
+      changed_when: true
+
+    - name: Delete every etcd key
+      ansible.builtin.command:
+        argv: "{{ _datastores_etcdctl + ['del', '', '--prefix'] }}"
+      changed_when: true
+      when: datastores_etcd_enabled | bool
+
+    - name: Stop NATS to wipe its JetStream store
+      ansible.builtin.systemd_service:
+        name: nats.service
+        state: stopped
+      when:
+        - datastores_nats_enabled | bool
+        - datastores_nats_jetstream | bool
+
+    - name: Wipe the JetStream store
+      ansible.builtin.file:
+        path: "{{ datastores_data_root }}/nats/jetstream"
+        state: absent
+      when:
+        - datastores_nats_enabled | bool
+        - datastores_nats_jetstream | bool
+
+    # Without JetStream there is no state to wipe; the restart drops every subscription so no
+    # client keeps working against pre-reset assumptions.
+    - name: Restart NATS
+      ansible.builtin.systemd_service:
+        name: nats.service
+        state: restarted
+      when: datastores_nats_enabled | bool
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          Application data wiped; empty declared databases recreated. Tables come back when the
+          applications run their migrations. Workloads are not restarted from here — restart them
+          from their own deployment if they cache connections.

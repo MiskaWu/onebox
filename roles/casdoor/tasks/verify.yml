@@ -1,0 +1,57 @@
+---
+# Ask the running Casdoor, over loopback, whether what was declared took effect (ADR 0022:
+# "I executed" is not "it took effect").
+
+- name: Wait for Casdoor to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ casdoor_http_port }}/api/health"
+  register: _casdoor_health
+  until: _casdoor_health.status == 200
+  retries: 60
+  delay: 3
+
+# Every client compares the issuer in the discovery document with the one it was given; it
+# derives from `origin` in app.conf.
+- name: Read the discovery document
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ casdoor_http_port }}/.well-known/openid-configuration"
+  register: _casdoor_discovery
+
+- name: Assert the issuer is the one every service trusts
+  ansible.builtin.assert:
+    that:
+      - _casdoor_discovery.json.issuer == 'https://' ~ casdoor_hostname
+      - onebox_oidc_issuer == 'https://' ~ casdoor_hostname
+    fail_msg: >-
+      Casdoor announces issuer {{ _casdoor_discovery.json.issuer }}; the services trust
+      onebox_oidc_issuer={{ onebox_oidc_issuer }}; both must be https://{{ casdoor_hostname }}
+      or every sign-in fails (onebox_oidc_issuer derives from casdoor_hostname by default).
+    quiet: true
+
+# An unknown grant type is answered "unsupported_grant_type" only once Casdoor has found an
+# application with that client ID; "invalid_client" means none exists — typically an
+# application created by hand, which got its own generated ID. This proves the ID, not the secret.
+- name: Probe each application by its client ID
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ casdoor_http_port }}/api/login/oauth/access_token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: onebox-probe
+      client_id: "{{ lookup('ansible.builtin.vars', item ~ '_oidc_client_id') }}"
+    status_code: [200, 400, 401]
+  register: _casdoor_app_probe
+  loop: "{{ _casdoor_clients }}"
+
+- name: Assert every declared application exists
+  ansible.builtin.assert:
+    that:
+      - item.json.error | default('') == 'unsupported_grant_type'
+    fail_msg: >-
+      Casdoor has no application with the client ID of '{{ item.item }}'
+      ({{ item.json.error | default('no answer') }}). The init data did not create it — see
+      journalctl -u casdoor — or another application already uses that client ID.
+    quiet: true
+  loop: "{{ _casdoor_app_probe.results }}"
+  loop_control:
+    label: "{{ item.item }}"

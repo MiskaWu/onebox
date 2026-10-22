@@ -1,2 +1,102 @@
 ---
-casdoor_vhost_entries: []
+# Casdoor: the bundled OIDC identity provider (ADR 0018). Every platform service trusts
+# onebox_oidc_issuer; when this component is enabled that is https://{{ casdoor_hostname }}.
+
+# ── Image ────────────────────────────────────────────────────────────────────────────
+# Casdoor ships a new minor for almost every merged batch (continuous delivery, not semver):
+# judge a bump by its release notes, not by the distance between numbers. 4.18+ is required
+# for what this role relies on: init data in merge mode (declarations converge on every
+# start, not only on first creation), self sign-up that can be closed while upstream sign-in
+# still provisions accounts (4.19), and the first admin password from configuration (4.19,
+# no "first visitor sets it" window). Re-verify the security notes in README.md after bumps
+# that touch authentication.
+casdoor_image: "docker.io/casbin/casdoor:4.22.0@sha256:29624af41b03eb1d655685d5ae28a32115fdde96b745c824eb3ed631d437bf41"
+# The image runs as uid/gid 1000 (USER 1000). Files it must read are owned by that id;
+# re-check on image bumps: podman run --rm --entrypoint id <image>.
+casdoor_container_uid: 1000
+casdoor_http_port: 8000
+# conf/ (app.conf, no secrets) and secrets/ (init data with client secrets, root-only).
+casdoor_root: /var/lib/onebox/casdoor
+
+# ── Database ─────────────────────────────────────────────────────────────────────────
+# shared    : the datastores PostgreSQL (needs the datastores component). This role creates
+#             its own role and database there, idempotently — datastores owns only superusers.
+# dedicated : a PostgreSQL container of its own (casdoor-db) on a private network that
+#             publishes nothing. The isolation escape hatch (ADR 0011).
+# Switching modes does not move data.
+casdoor_db_mode: shared
+casdoor_db_name: casdoor
+casdoor_db_user: casdoor
+# shared mode: the datastores container (its name is also its DNS name on the data network).
+casdoor_db_shared_host: postgres
+# dedicated mode only.
+casdoor_db_image: "docker.io/library/postgres:18.6-alpine@sha256:83148c0bc09eac4d598b70a61e1404d0212b76c95c504bfd6c81a4c59ec91792"
+casdoor_db_uid: 70                       # postgres user of the alpine image
+casdoor_db_data_dir: /var/lib/onebox/casdoor-db
+
+# ── Organisation and applications ────────────────────────────────────────────────────
+# Where people live. Never `built-in`: every user of the built-in organisation is a global
+# Casdoor administrator, whatever flags their account carries (preflight refuses it).
+# The name is part of every identity (the user's id is organisation/name): renaming later
+# creates new identities.
+casdoor_organization: onebox
+casdoor_organization_display_name: "{{ onebox_env }}"
+# Signing certificate for the applications' tokens. cert-built-in exists in every instance and
+# may be used by any organisation.
+casdoor_cert: cert-built-in
+# One application per entry of onebox_oidc_clients whose component is enabled (an entry may
+# name it with `component:`; the default is the entry's key). Client ID and secret are the
+# secrets <name>_oidc_client_id / <name>_oidc_client_secret — never create applications by
+# hand: the UI generates its own pair, which no service holds.
+casdoor_token_hours: 24
+
+# ── Upstream identity providers (optional) ───────────────────────────────────────────
+# Let people sign in with an existing directory; Casdoor brokers it to every service, so
+# rotating the upstream client secret touches only Casdoor. Each entry:
+#   - name: corp                         [a-z0-9-]; secret casdoor_idp_<name>_client_secret
+#     type: oidc                         a key of the catalog in vars/main.yml (oidc, azuread,
+#                                        google, github) or of casdoor_idp_catalog_extra
+#     display_name: Company SSO          login button text
+#     client_id: "…"                     not a secret
+#     issuer: https://idp.example.com/realms/main            (oidc)
+#     auth_url: https://idp.example.com/realms/main/protocol/openid-connect/auth
+#                                        (oidc: the login page needs it; token and userinfo
+#                                        endpoints are discovered from the issuer, or set
+#                                        token_url / userinfo_url)
+#     tenant: 00000000-0000-0000-0000-000000000000   (azuread: required — an empty tenant
+#                                        falls back to "common", i.e. any Microsoft account)
+#     scopes: "openid profile email"     optional override
+#     extra: {}                          raw Casdoor provider fields, merged last
+# The tenant lock is double: register the upstream application as single-tenant too.
+casdoor_identity_providers: []
+casdoor_idp_catalog_extra: {}
+# Create a Casdoor account on someone's first upstream sign-in. Self sign-up (the local
+# registration page and API) stays closed either way.
+casdoor_idp_signup: true
+# Show the local username/password form. With exactly one upstream provider and the form
+# hidden, the login page sends people straight to it. Cosmetic only: the API still accepts
+# passwords (which keeps the admin's break-glass login working).
+casdoor_password_form: true
+
+# ── Exposure ─────────────────────────────────────────────────────────────────────────
+# Internal-only, like every vhost. Server-to-server calls (discovery, token exchange) come
+# back through the edge from container and pod addresses, so those ranges are allowed too:
+# podman's default network (GitLab, OpenBao), the data network (anything on it), and the pod
+# CIDR when the cluster runs here (Argo CD). Missing a range = 403 = single sign-on broken.
+casdoor_internal_client_cidrs: >-
+  {{ [onebox_container_default_cidr, onebox_data_subnet]
+     + ([k3s_cluster_cidr | default('10.42.0.0/16')] if 'k3s' in onebox_components else []) }}
+# Making the identity provider public is a deliberate decision (preflight asks for this flag
+# when an entry sets internal_only: false): check first that self sign-up is closed, the admin
+# password is strong and someone owns the patch cadence.
+casdoor_allow_public: false
+casdoor_vhost_entries:
+  - hostname: "{{ casdoor_hostname }}"
+    upstream: "127.0.0.1:{{ casdoor_http_port }}"
+    title: Casdoor
+    description: Single sign-on
+    allow_cidrs: "{{ (onebox_lan_cidrs + casdoor_internal_client_cidrs) | unique }}"
+    lb_try_duration: 10s
+
+# Notify=healthy needs podman >= 5.0 (Ubuntu 24.04 ships 4.9). auto = from `podman --version`.
+casdoor_notify_healthy: auto

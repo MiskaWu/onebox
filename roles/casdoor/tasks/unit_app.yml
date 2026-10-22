@@ -1,0 +1,24 @@
+---
+- name: Casdoor container
+  ansible.builtin.include_role:
+    name: podman_quadlet
+    tasks_from: "{{ _casdoor_quadlet_tasks }}"
+  vars:
+    podman_quadlet_name: casdoor
+    podman_quadlet_image: "{{ casdoor_image }}"
+    podman_quadlet_publish: ["127.0.0.1:{{ casdoor_http_port }}:8000"]
+    podman_quadlet_secrets: "{{ _casdoor_secret_env }}"
+    podman_quadlet_volumes:
+      - "{{ _casdoor_conf_dir }}/app.conf:/conf/app.conf:ro,Z"
+      - "{{ _casdoor_secrets_dir }}/init_data.json:/conf/init_data.json:ro,Z"
+    podman_quadlet_networks: "{{ _casdoor_networks }}"
+    # Bound to the database unit: a database restart restarts Casdoor, whose connection pool
+    # would otherwise linger half-broken. With podman >= 5 the database counts as started only
+    # once it is healthy, so Casdoor never races it at boot.
+    podman_quadlet_after: ["{{ _casdoor_db_service }}"]
+    podman_quadlet_requires: ["{{ _casdoor_db_service }}"]
+    podman_quadlet_options: >-
+      {{ ['HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:8000/api/health',
+          'HealthInterval=10s', 'HealthTimeout=5s', 'HealthRetries=5', 'HealthStartPeriod=60s']
+         + (['Notify=healthy'] if _casdoor_notify | bool else []) }}
+    podman_quadlet_timeout_start: 180

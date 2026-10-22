@@ -1,0 +1,66 @@
+---
+# Raft snapshot (for a `make openbao-backup` target; include with tasks_from: backup.yml).
+# Snapshots go to openbao_backup_dir; the newest openbao_backup_keep are kept.
+#
+# What the snapshot is and is not: it is the encrypted store. It does NOT contain the seal
+# passphrase — on purpose: a backup that carries its own key is not encrypted. Restoring needs
+# openbao_seal_key from your password manager. The root token file is copied alongside (it
+# cannot decrypt anything; without it nobody can administer the restored store).
+
+- name: Backup directory
+  ansible.builtin.file:
+    path: "{{ openbao_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Read the root token
+  ansible.builtin.slurp:
+    src: "{{ _openbao_root_token_file }}"
+  register: _openbao_backup_token
+  no_log: true
+
+- name: Take a raft snapshot
+  ansible.builtin.uri:
+    url: "{{ _openbao_api }}/v1/sys/storage/raft/snapshot"
+    headers:
+      X-Vault-Token: "{{ _openbao_backup_token.content | b64decode | trim }}"
+    dest: "{{ _dir }}/openbao-{{ _stamp }}.snap"
+    mode: "0600"
+    status_code: [200]
+  vars:
+    _dir: "{{ openbao_backup_dir }}"
+    _stamp: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+  register: _openbao_backup_snap
+  no_log: true
+
+# A failed request can still leave a file behind (an error document): a backup that only looks
+# done is worse than none. A raft snapshot is a gzip archive.
+- name: Verify the snapshot is a gzip archive
+  ansible.builtin.command:
+    argv: [gzip, -t, "{{ _openbao_backup_snap.path }}"]
+  changed_when: false
+
+- name: Copy the root token next to it
+  ansible.builtin.copy:
+    src: "{{ _openbao_root_token_file }}"
+    dest: "{{ _openbao_backup_snap.path | regex_replace('\\.snap$', '.root-token') }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Find old snapshots
+  ansible.builtin.find:
+    paths: "{{ openbao_backup_dir }}"
+    patterns: ["openbao-*.snap", "openbao-*.root-token"]
+  register: _openbao_backup_old
+
+- name: Keep the newest snapshots only
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ (_openbao_backup_old.files | sort(attribute='mtime', reverse=true))[(openbao_backup_keep | int) * 2 :] }}"
+  loop_control:
+    label: "{{ item.path | basename }}"

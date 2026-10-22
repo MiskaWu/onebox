@@ -1,0 +1,56 @@
+{#- Contains client secrets: rendered with no_log into a root-only directory, file owned by the
+    container user, mode 0400.
+
+    Casdoor applies this file on every start in merge mode (initDataMerge): objects that do not
+    exist are created, existing ones get exactly the fields written here — so a changed
+    redirect URI or a rotated secret converges, and fields edited in the UI that are not listed
+    here are left alone. Nothing here touches the built-in organisation: declaring it would
+    make Casdoor replace it.
+
+    The structure is built as data and serialised once, so every value is JSON-escaped. -#}
+{%- set providers = [] -%}
+{%- for p in casdoor_identity_providers -%}
+{%-   set cat = _casdoor_idp_types[p.type] -%}
+{%-   set obj = {'owner': 'admin', 'name': p.name, 'displayName': p.display_name | default(p.name),
+                 'category': 'OAuth', 'type': cat.type, 'clientId': p.client_id,
+                 'clientSecret': lookup('ansible.builtin.vars', 'casdoor_idp_' ~ (p.name | replace('-', '_')) ~ '_client_secret'),
+                 'scopes': p.scopes | default(cat.scopes)} -%}
+{%-   for field, key in cat.fields.items() if p[key] is defined -%}
+{%-     set _ = obj.update({field: p[key]}) -%}
+{%-   endfor -%}
+{%-   set _ = providers.append(obj | combine(p.extra | default({}))) -%}
+{%- endfor -%}
+{%- set provider_items = [] -%}
+{%- for p in casdoor_identity_providers -%}
+{%-   set _ = provider_items.append({'name': p.name, 'canSignUp': casdoor_idp_signup | bool, 'canSignIn': true,
+                                     'canUnlink': true, 'prompted': false, 'alertType': 'None'}) -%}
+{%- endfor -%}
+{%- set applications = [] -%}
+{%- for name in _casdoor_clients -%}
+{%-   set client = onebox_oidc_clients[name] -%}
+{%-   set _ = applications.append({
+        'owner': 'admin',
+        'name': name,
+        'displayName': client.title | default(name),
+        'organization': casdoor_organization,
+        'cert': casdoor_cert,
+        'clientId': lookup('ansible.builtin.vars', name ~ '_oidc_client_id'),
+        'clientSecret': lookup('ansible.builtin.vars', name ~ '_oidc_client_secret'),
+        'redirectUris': client.redirect_uris,
+        'grantTypes': ['authorization_code', 'refresh_token'],
+        'tokenFormat': 'JWT',
+        'expireInHours': casdoor_token_hours | int,
+        'refreshExpireInHours': casdoor_token_hours | int,
+        'enablePassword': true,
+        'enableSignUp': (casdoor_idp_signup | bool) and (casdoor_identity_providers | length > 0),
+        'disableSelfSignup': true,
+        'providers': provider_items,
+        'signinMethods': [{'name': 'Password', 'displayName': 'Password',
+                           'rule': 'All' if casdoor_password_form | bool else 'Hide password'}]
+      }) -%}
+{%- endfor -%}
+{{ {'organizations': [{'owner': 'admin', 'name': casdoor_organization,
+                       'displayName': casdoor_organization_display_name,
+                       'passwordType': 'bcrypt', 'passwordOptions': ['AtLeast8']}],
+    'applications': applications,
+    'providers': providers} | to_nice_json(indent=2) }}

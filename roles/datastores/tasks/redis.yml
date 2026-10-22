@@ -1,0 +1,72 @@
+---
+# Redis cluster formation — the one step after `podman_quadlet` that turns running
+# containers into a working cluster. "All units active" says nothing about this: nodes that
+# never met each other look exactly as healthy (tasks/status.yml shows the real state).
+
+- name: Wait for every node to answer
+  ansible.builtin.command:
+    argv: [podman, exec, "redis-{{ item }}", sh, -c, "{{ _datastores_redis_cli }} ping"]
+  register: _datastores_redis_ping
+  until: _datastores_redis_ping.stdout | trim == 'PONG'
+  retries: 30
+  delay: 2
+  changed_when: false
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    label: "redis-{{ item }}"
+
+- name: Read each node's view of the cluster
+  ansible.builtin.command:
+    argv: [podman, exec, "redis-{{ item }}", sh, -c, "{{ _datastores_redis_cli }} cluster info"]
+  register: _datastores_redis_info
+  changed_when: false
+  loop: "{{ _datastores_redis_nodes }}"
+  loop_control:
+    label: "redis-{{ item }}"
+
+# A node that never joined anything knows exactly one node: itself. Creation is guarded by
+# "every node is fresh", not by cluster_state: a degraded cluster also reports `fail`, and
+# creating again would stop at "Node is not empty".
+- name: Classify the nodes
+  ansible.builtin.set_fact:
+    _datastores_redis_known: >-
+      {{ _datastores_redis_info.results | map(attribute='stdout')
+         | map('regex_findall', 'cluster_known_nodes:(\d+)') | map('join') | map('int') | list }}
+
+- name: Create the cluster (first converge only)
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - redis-0
+      - sh
+      - -c
+      - >-
+        {{ _datastores_redis_cli }} --cluster create
+        {{ datastores_redis_ips | map('regex_replace', '$', ':6379') | join(' ') }}
+        --cluster-replicas 0 --cluster-yes
+  register: _datastores_redis_create
+  changed_when: true
+  when: _datastores_redis_known | max == 1
+
+# Half-formed (met but slots not assigned) stops here on purpose: automatically "repairing" a
+# cluster in an unknown state can lose data. The message says how to look and repair.
+- name: Wait for the cluster to be complete
+  ansible.builtin.command:
+    argv: [podman, exec, redis-0, sh, -c, "{{ _datastores_redis_cli }} cluster info"]
+  register: _datastores_redis_state
+  until: "'cluster_state:ok' in _datastores_redis_state.stdout"
+  retries: 15
+  delay: 2
+  changed_when: false
+
+- name: Point out nodes that are running but not in the cluster
+  ansible.builtin.debug:
+    msg: >-
+      {{ _datastores_redis_known | select('equalto', 1) | list | length }} Redis node(s) run
+      outside the cluster (datastores_redis_ips grew after the cluster was created). Adding
+      them is deliberate: redis-cli --cluster add-node, then --cluster reshard
+      (roles/datastores/README.md, "Changing the cluster size").
+  when:
+    - _datastores_redis_known | max > 1
+    - 1 in _datastores_redis_known

@@ -1,0 +1,84 @@
+---
+# Read-only report (for a `make openbao-status` target; include with tasks_from: status.yml).
+# Prints seal state, mounts, auth methods and the effective sign-in roles — never the root
+# token or the recovery key (this output is the kind people paste into chats).
+
+- name: Read the seal status
+  ansible.builtin.uri:
+    url: "{{ _openbao_api }}/v1/sys/seal-status"
+  register: _openbao_status_seal
+  failed_when: false
+  check_mode: false
+
+- name: Look for the root token
+  ansible.builtin.stat:
+    path: "{{ _openbao_root_token_file }}"
+  register: _openbao_status_token_stat
+
+- name: Read the root token
+  ansible.builtin.slurp:
+    src: "{{ _openbao_root_token_file }}"
+  register: _openbao_status_token
+  no_log: true
+  when: _openbao_status_token_stat.stat.exists
+
+- name: Read mounts, auth methods and roles
+  vars:
+    _headers:
+      X-Vault-Token: "{{ _openbao_status_token.content | default('') | b64decode | trim }}"
+  when: _openbao_status_token_stat.stat.exists
+  block:
+    - name: Read the secrets engines
+      ansible.builtin.uri:
+        url: "{{ _openbao_api }}/v1/sys/mounts"
+        headers: "{{ _headers }}"
+      register: _openbao_status_mounts
+      failed_when: false
+      no_log: true
+
+    - name: Read the auth methods
+      ansible.builtin.uri:
+        url: "{{ _openbao_api }}/v1/sys/auth"
+        headers: "{{ _headers }}"
+      register: _openbao_status_auths
+      failed_when: false
+      no_log: true
+
+    # The effective bound_claims (key and values): a role whose key is wrong admits nobody,
+    # silently.
+    - name: Read the sign-in roles
+      ansible.builtin.uri:
+        url: "{{ _openbao_api }}/v1/auth/{{ _openbao_oidc_mount }}/role/{{ item.name }}"
+        headers: "{{ _headers }}"
+        status_code: [200, 404]
+      loop: "{{ _openbao_tiers }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _openbao_status_roles
+      failed_when: false
+      no_log: true
+
+- name: Look for a recovery key still on this host
+  ansible.builtin.stat:
+    path: "{{ _openbao_recovery_file }}"
+  register: _openbao_status_recovery
+
+- name: OpenBao status
+  ansible.builtin.debug:
+    msg:
+      - >-
+        seal: {{ 'API UNREACHABLE' if _seal is not mapping
+                 else ('sealed' if _seal.sealed else 'unsealed') ~ ' (' ~ _seal.type ~ ', initialized='
+                      ~ _seal.initialized ~ ', version ' ~ _seal.version ~ ')' }}
+      - "root token file: {{ 'present' if _openbao_status_token_stat.stat.exists else 'MISSING' }}"
+      - >-
+        recovery key on host: {{ ('YES — move it offline, then delete ' ~ _openbao_recovery_file)
+                                 if _openbao_status_recovery.stat.exists else 'no' }}
+      - "secrets engines: {{ (_openbao_status_mounts.json.data | default({})).keys() | list | join(' ') or 'unknown' }}"
+      - "auth methods: {{ (_openbao_status_auths.json.data | default({})).keys() | list | join(' ') or 'unknown' }}"
+      - >-
+        sign-in roles:
+        {% for r in _openbao_status_roles.results | default([]) -%}
+        {{ r.item.name }}={{ (r.json.data.bound_claims | to_json) if r.status | default(0) == 200 else 'absent' }}{{ ' ' }}{%- endfor %}
+  vars:
+    _seal: "{{ _openbao_status_seal.json | default(none) }}"

@@ -1,0 +1,91 @@
+---
+# Kubernetes auth for External Secrets. Self-contained (reads its own token), so it can also
+# be run on its own:  include_role: {name: openbao, tasks_from: kubernetes_auth.yml}
+#
+# No reviewer token is stored: OpenBao sends the client's own service-account token to the
+# API server's TokenReview, so that service account needs system:auth-delegator (granted on
+# the cluster side). Nothing long-lived to keep or rotate on either side.
+
+# The API server's CA from the k3s server; its absence means k3s is not installed (yet).
+- name: Look for the cluster's API server CA
+  ansible.builtin.stat:
+    path: "{{ openbao_k8s_ca_file }}"
+  register: _openbao_k8s_ca_stat
+
+- name: Note that Kubernetes auth waits for the cluster
+  ansible.builtin.debug:
+    msg: >-
+      {{ openbao_k8s_ca_file }} does not exist: k3s is not installed (yet), so Kubernetes auth for
+      External Secrets is not configured in this run. Converge k3s, then `make openbao` again.
+  when: not _openbao_k8s_ca_stat.stat.exists
+
+- name: Configure Kubernetes auth
+  when: _openbao_k8s_ca_stat.stat.exists
+  block:
+    - name: Read the root token
+      ansible.builtin.slurp:
+        src: "{{ _openbao_root_token_file }}"
+      register: _openbao_k8s_token_raw
+      no_log: true
+
+    - name: Read the API server CA
+      ansible.builtin.slurp:
+        src: "{{ openbao_k8s_ca_file }}"
+      register: _openbao_k8s_ca
+
+    - name: Configure the Kubernetes auth method
+      vars:
+        _headers:
+          X-Vault-Token: "{{ _openbao_k8s_token_raw.content | b64decode | trim }}"
+      block:
+        - name: Read the enabled auth methods
+          ansible.builtin.uri:
+            url: "{{ _openbao_api }}/v1/sys/auth"
+            headers: "{{ _headers }}"
+          register: _openbao_k8s_auths
+          no_log: true
+
+        - name: Enable Kubernetes auth at {{ openbao_k8s_auth_mount }}
+          ansible.builtin.uri:
+            url: "{{ _openbao_api }}/v1/sys/auth/{{ openbao_k8s_auth_mount }}"
+            method: POST
+            headers: "{{ _headers }}"
+            body_format: json
+            body:
+              type: kubernetes
+              description: External Secrets Operator
+            status_code: [200, 204]
+          changed_when: true
+          no_log: true
+          when: (openbao_k8s_auth_mount ~ '/') not in _openbao_k8s_auths.json.data
+
+        # No token_reviewer_jwt on purpose (see the top of this file). disable_local_ca_jwt:
+        # OpenBao does not run in a pod, there is no local service account to fall back to.
+        - name: Point Kubernetes auth at the API server
+          ansible.builtin.uri:
+            url: "{{ _openbao_api }}/v1/auth/{{ openbao_k8s_auth_mount }}/config"
+            method: POST
+            headers: "{{ _headers }}"
+            body_format: json
+            body:
+              kubernetes_host: "{{ openbao_k8s_api_url }}"
+              kubernetes_ca_cert: "{{ _openbao_k8s_ca.content | b64decode }}"
+              disable_local_ca_jwt: true
+            status_code: [200, 204]
+          changed_when: false
+          no_log: true
+
+        - name: Bind the External Secrets service account to the read-only policy
+          ansible.builtin.uri:
+            url: "{{ _openbao_api }}/v1/auth/{{ openbao_k8s_auth_mount }}/role/{{ openbao_eso_role }}"
+            method: POST
+            headers: "{{ _headers }}"
+            body_format: json
+            body:
+              bound_service_account_names: ["{{ external_secrets_service_account }}"]
+              bound_service_account_namespaces: ["{{ external_secrets_namespace }}"]
+              token_policies: [onebox-external-secrets]
+              token_ttl: "{{ openbao_eso_token_ttl }}"
+            status_code: [200, 204]
+          changed_when: false
+          no_log: true

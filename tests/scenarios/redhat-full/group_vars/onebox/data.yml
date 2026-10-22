@@ -1,0 +1,9 @@
+---
+# datastores / openbao / casdoor settings for the full scenario (the data-* scenarios cover
+# the other branches).
+datastores_etcd_enabled: true
+datastores_postgres_databases:
+  - name: app_dev
+    owner: app_dev
+    password_var: app_dev_db_password
+openbao_oidc_admins: [alice@example.test]

@@ -1,0 +1,11 @@
+---
+datastores_redis_publish_local: false
+datastores_postgres_ip: ""
+datastores_notify_healthy: false
+casdoor_notify_healthy: false
+
+casdoor_db_mode: dedicated
+openbao_audit_stdout: false
+openbao_oidc_bind_claim: groups
+openbao_oidc_admins: [platform-admins]
+openbao_oidc_readers: [developers]

@@ -1,2 +1,106 @@
 ---
-openbao_vhost_entries: []
+# OpenBao: the secrets store for workloads (ADR 0017). It runs on the host, not in the
+# cluster, and External Secrets reaches it through the edge at https://{{ openbao_hostname }}.
+# Platform secrets stay in secrets.yml: the code that deploys OpenBao cannot depend on it.
+
+# ── Image ────────────────────────────────────────────────────────────────────────────
+# 2.7 removed the `file` storage backend and moved the cloud-KMS and PKCS#11 seals out of the
+# binary into plugins. Raft storage and the static seal used here are still built in
+# (verified against 2.7.1: the server logs `Auto Seal: static (builtin: true …)`). Before the
+# next minor, re-read its release notes for both.
+openbao_image: "quay.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
+# The image runs as openbao (uid 100, gid 1000). Host directories it writes must belong to
+# these ids; re-check on image bumps: podman run --rm --entrypoint id <image>.
+openbao_container_uid: 100
+openbao_container_gid: 1000
+
+# ── Listener and paths ───────────────────────────────────────────────────────────────
+openbao_http_port: 8200
+openbao_log_level: info
+# config/ holds the (secret-free) server configuration, data/ the raft store. state/ is
+# root-only: the root token and, until you move it offline, the recovery key.
+openbao_root: /var/lib/onebox/openbao
+
+# ── Seal ─────────────────────────────────────────────────────────────────────────────
+# Static auto-unseal: the server unseals itself on every start, so a reboot needs nobody.
+# The key is derived as SHA-256 of the secret openbao_seal_key (any random string of 32+
+# characters; make secrets-gen KEY=openbao_seal_key LENGTH=48), so the passphrase in
+# secrets.yml is what you keep — not the derived bytes. Losing it means every secret in the
+# store is gone for good, and data backups cannot be decrypted without it: put a copy in your
+# password manager when you create it. README.md compares the other seal types.
+#
+# Rotation: set openbao_seal_previous_key to the current passphrase and openbao_seal_key to a
+# new one, converge (the server re-wraps its keys with the new one), then remove the previous
+# key and converge again. Changing openbao_seal_key alone leaves the store sealed.
+openbao_seal_previous_key: ""
+
+# ── Secrets engine and policies ──────────────────────────────────────────────────────
+# KV v2 at {{ openbao_kv_mount }} (group_vars, shared with external_secrets). Layout:
+# platform/registry/<registry>/<tenant>, platform/datastore/<engine>, <tenant>/env/<tier>.
+#
+# Audit log to the journal (journalctl -u openbao): who read or wrote what, with values
+# HMAC'd. OpenBao 2.7 manages audit devices only declaratively, in the configuration file.
+openbao_audit_stdout: true
+
+# ── Human sign-in (OIDC) ─────────────────────────────────────────────────────────────
+# On when an issuer is configured (Casdoor or any OIDC IdP). Client ID and secret are the
+# secrets openbao_oidc_client_id / openbao_oidc_client_secret.
+openbao_oidc_enabled: "{{ onebox_oidc_issuer | length > 0 }}"
+# Identity shown in tokens and audit logs (sub is an opaque id nobody recognises).
+openbao_oidc_user_claim: email
+# Which claim the tiers below match against: email (a list of addresses) or a list claim such
+# as groups (group names). All tiers use the same claim.
+openbao_oidc_bind_claim: email
+openbao_oidc_scopes: [openid, profile, email]
+openbao_oidc_token_ttl: 8h
+# CA that signed the issuer's certificate, when the system trust store does not know it:
+# OpenBao fetches the issuer's discovery document itself (from inside its container).
+# Defaults to the edge's own CA when the bundled Casdoor sits behind an edge in `internal` TLS
+# mode; set a path (or the PEM text in openbao_oidc_ca_pem) for a private CA in `files` mode
+# or for an external issuer. Empty = system trust store. Setting it REPLACES the system store
+# for this purpose, so leave it empty for publicly trusted issuers.
+openbao_oidc_ca_file: >-
+  {{ (onebox_edge_ca_file | default(''))
+     if (edge_tls_mode | default('') == 'internal' and 'casdoor' in onebox_components) else '' }}
+openbao_oidc_ca_pem: ""
+# Tiers: who gets which policy. Higher tiers are included in lower ones, so everyone can sign in
+# with the default role. These lists ARE the authorisation boundary — with Casdoor, signing in
+# to the identity provider proves an identity, not a right to the store. Values of
+# openbao_oidc_bind_claim (email addresses or group names).
+openbao_oidc_admins: []                  # everything, including policies and auth methods
+openbao_oidc_writers: []                 # read/write values under the KV mount
+openbao_oidc_readers: []                 # read values under the KV mount (all of them)
+# Tier used when the Role field of the login form is left empty (the UI cannot list roles
+# before login). Not a security boundary — the lists are — but it must cover everybody who
+# may sign in, or they fail with an error that does not say "type a role".
+openbao_oidc_default_role: reader
+
+# ── Kubernetes auth for External Secrets ─────────────────────────────────────────────
+# Configured when 'external-secrets' is in onebox_components. OpenBao validates the
+# operator's own service-account token through TokenReview (no stored reviewer token), so that
+# service account needs system:auth-delegator. The API server address as seen from the
+# OpenBao container — not 127.0.0.1, which is the container's own loopback.
+openbao_k8s_api_url: "https://{{ onebox_host_ip }}:6443"
+# CA that signed the API server's certificate (k3s server CA, on this host).
+openbao_k8s_ca_file: /var/lib/rancher/k3s/server/tls/server-ca.crt
+openbao_eso_token_ttl: 1h
+# Source of those calls: the container sits on podman's default network. Its subnet is opened
+# to the API port in the host firewall (firewalld backend), nothing else.
+openbao_container_cidr: "{{ onebox_container_default_cidr }}"
+
+# ── Backups (tasks/backup.yml, an operation — not part of convergence) ───────────────
+# Raft snapshots, root-only. The seal passphrase is never written next to them.
+openbao_backup_dir: /var/backups/onebox/openbao
+openbao_backup_keep: 14
+
+# ── Edge ─────────────────────────────────────────────────────────────────────────────
+# Internal-only like every vhost. In-cluster clients (External Secrets) come back through the
+# edge with pod addresses, so the pod CIDR is allowed as well when the cluster runs here.
+openbao_pod_cidrs: "{{ [k3s_cluster_cidr | default('10.42.0.0/16')] if 'k3s' in onebox_components else [] }}"
+openbao_vhost_entries:
+  - hostname: "{{ openbao_hostname }}"
+    upstream: "127.0.0.1:{{ openbao_http_port }}"
+    title: OpenBao
+    description: Secrets store
+    allow_cidrs: "{{ (onebox_lan_cidrs + openbao_pod_cidrs) | unique }}"
+    lb_try_duration: 10s

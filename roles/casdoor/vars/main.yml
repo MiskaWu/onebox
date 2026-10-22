@@ -1,0 +1,106 @@
+---
+# Internal constants and derived values (role vars outrank the inventory: not knobs).
+
+_casdoor_conf_dir: "{{ casdoor_root }}/conf"
+# Root-only (0700). The init data inside carries every application's client secret — and with
+# Casdoor any application's client secret authenticates to its management API as a global
+# administrator — so no host account but root may reach it.
+_casdoor_secrets_dir: "{{ casdoor_root }}/secrets"
+
+# ── Database wiring per mode ─────────────────────────────────────────────────────────
+_casdoor_shared: "{{ casdoor_db_mode == 'shared' }}"
+# Container the role runs psql in, and the superuser it connects as (unix socket, trusted
+# locally by the image — no superuser password involved).
+_casdoor_db_container: "{{ 'postgres' if _casdoor_shared | bool else 'casdoor-db' }}"
+_casdoor_db_superuser: "{{ 'postgres' if _casdoor_shared | bool else casdoor_db_user }}"
+_casdoor_db_host: "{{ casdoor_db_shared_host if _casdoor_shared | bool else 'casdoor-db' }}"
+_casdoor_db_service: "{{ 'postgres.service' if _casdoor_shared | bool else 'casdoor-db.service' }}"
+# Dedicated mode: an internal network (no route out) shared by casdoor-db and Casdoor only.
+_casdoor_db_network: casdoor-db
+# psql inside the database container, as its superuser over the unix socket.
+_casdoor_psql:
+  - podman
+  - exec
+  - "{{ _casdoor_db_container }}"
+  - psql
+  - -v
+  - ON_ERROR_STOP=1
+  - -U
+  - "{{ _casdoor_db_superuser }}"
+  - -d
+  - postgres
+# Casdoor itself needs a route out (upstream identity providers): in dedicated mode it also
+# joins podman's default network.
+_casdoor_networks: >-
+  {{ [onebox_data_network ~ '.network'] if _casdoor_shared | bool
+     else [_casdoor_db_network ~ '.network', 'podman'] }}
+
+# libpq keyword/value form (not a URL): Casdoor passes it to lib/pq as is. Postgres needs
+# dbname= inside it — Casdoor only appends the database name for MySQL. Quoted, so any
+# password character works.
+_casdoor_dsn: >-
+  user={{ casdoor_db_user }}
+  password='{{ casdoor_db_password | replace('\\', '\\\\') | replace("'", "\\'") }}'
+  host={{ _casdoor_db_host }} port=5432 sslmode=disable dbname={{ casdoor_db_name }}
+
+# Casdoor always starts a RADIUS listener (4.22 has no switch for it) with the upstream
+# default shared secret "secret". It is never published, but it is reachable on the container's
+# network — so it gets a secret derived from the database password instead.
+_casdoor_radius_secret: "{{ (casdoor_db_password ~ ':radius') | hash('sha256') }}"
+
+# Secret environment for the container (podman secrets). Casdoor reads every configuration
+# key from an environment variable of the same name first, so these override app.conf.
+_casdoor_secret_env:
+  dataSourceName: "{{ _casdoor_dsn }}"
+  # Used once, when Casdoor creates built-in/admin on its first start. Without it the
+  # password stays empty until somebody opens the welcome page — first visitor wins.
+  initAdminPassword: "{{ casdoor_admin_password }}"
+  radiusSecret: "{{ _casdoor_radius_secret }}"
+
+# ── Applications: entries of onebox_oidc_clients whose component is enabled ──────────
+_casdoor_client_names: >-
+  {%- for name, client in onebox_oidc_clients.items() | sort
+      if (client.component | default(name)) in onebox_components -%}
+  {{ name }}{{ ',' if not loop.last else '' }}
+  {%- endfor -%}
+_casdoor_clients: "{{ _casdoor_client_names.split(',') | select | list }}"
+
+# ── Upstream identity provider catalog ───────────────────────────────────────────────
+# type      Casdoor provider type
+# scopes    default scopes ("" = the provider's built-in default)
+# required  entry keys that must be set
+# fields    Casdoor provider field → entry key
+# Adding a provider = adding an entry here or in casdoor_idp_catalog_extra.
+_casdoor_idp_catalog:
+  oidc:
+    type: OIDC
+    scopes: openid profile email
+    required: [issuer, auth_url]
+    fields:
+      domain: issuer
+      customAuthUrl: auth_url
+      customTokenUrl: token_url
+      customUserInfoUrl: userinfo_url
+  # Microsoft Entra ID. The tenant goes into `domain`; empty means the multi-tenant
+  # "common" endpoint, which admits any Microsoft account.
+  azuread:
+    type: AzureAD
+    scopes: ""
+    required: [tenant]
+    fields:
+      domain: tenant
+  google:
+    type: Google
+    scopes: ""
+    required: []
+    fields: {}
+  github:
+    type: GitHub
+    scopes: ""
+    required: []
+    fields: {}
+_casdoor_idp_types: "{{ _casdoor_idp_catalog | combine(casdoor_idp_catalog_extra) }}"
+
+_casdoor_notify: >-
+  {{ (casdoor_notify_healthy | bool) if casdoor_notify_healthy != 'auto'
+     else (_casdoor_podman_version | default('5.0') is version('5.0', '>=')) }}

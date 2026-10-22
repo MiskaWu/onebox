@@ -1,0 +1,213 @@
+---
+# Internal constants and derived values. Not meant to be overridden (role vars outrank the
+# inventory); everything an environment chooses is in defaults/main.yml.
+
+# Container names are also their DNS names on the data network and their service names
+# (<name>.service). Other roles rely on them: casdoor creates its database with
+# `podman exec postgres …`, applications use `postgres:5432` in their DSNs.
+_datastores_postgres_superuser: postgres
+_datastores_mysql_root_user: root
+_datastores_network_unit: "{{ onebox_data_network }}.network"
+
+# Mount points inside the images. PostgreSQL's follows the major version: 18+ keeps PGDATA in
+# /var/lib/postgresql/<major>/docker and expects the volume at /var/lib/postgresql; 16/17
+# used /var/lib/postgresql/data.
+_datastores_postgres_mount: /var/lib/postgresql
+_datastores_mysql_mount: /var/lib/mysql
+
+# ── Default fixed addresses: network address of onebox_data_subnet + offset ──────────
+# Integer arithmetic instead of an ipaddr filter (ansible-core only). preflight.yml asserts
+# that whatever ends up configured lies inside the subnet.
+_datastores_net_octets: "{{ onebox_data_subnet.split('/')[0].split('.') | map('int') | list }}"
+_datastores_net_int: >-
+  {{ ((_datastores_net_octets[0] * 256 + _datastores_net_octets[1]) * 256
+      + _datastores_net_octets[2]) * 256 + _datastores_net_octets[3] }}
+_datastores_net_size: "{{ 2 ** (32 - (onebox_data_subnet.split('/')[1] | int)) }}"
+_datastores_ip_at:
+  postgres: "{% set n = (_datastores_net_int | int) + 201 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+  mysql: "{% set n = (_datastores_net_int | int) + 202 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+  nats: "{% set n = (_datastores_net_int | int) + 203 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+  etcd: "{% set n = (_datastores_net_int | int) + 204 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+  redis_0: "{% set n = (_datastores_net_int | int) + 211 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+  redis_1: "{% set n = (_datastores_net_int | int) + 212 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+  redis_2: "{% set n = (_datastores_net_int | int) + 213 %}{{ [n // 16777216, n // 65536 % 256, n // 256 % 256, n % 256] | join('.') }}"
+
+# Every configured fixed address of an enabled engine (preflight checks range and uniqueness).
+_datastores_fixed_ips: >-
+  {{ (([datastores_postgres_ip] if datastores_postgres_enabled | bool else [])
+      + ([datastores_mysql_ip] if datastores_mysql_enabled | bool else [])
+      + ([datastores_nats_ip] if datastores_nats_enabled | bool else [])
+      + ([datastores_etcd_ip] if datastores_etcd_enabled | bool else [])
+      + (datastores_redis_ips if datastores_redis_enabled | bool else []))
+     | select | list }}
+
+# ── Health checks ────────────────────────────────────────────────────────────────────
+# Checks connect over TCP on purpose: during first initialisation PostgreSQL and MySQL run a
+# temporary server without networking, so "healthy" only turns true for the real server.
+# redis-cli exits 0 on any reply (NOAUTH included) and non-zero only when nothing answers —
+# a liveness check that needs no password. etcd's own check needs credentials once auth is
+# on (an anonymous read is refused as "user name is empty"), so it only has one without auth.
+_datastores_health_common:
+  - HealthInterval=10s
+  - HealthTimeout=5s
+  - HealthRetries=5
+  - HealthStartPeriod=60s
+
+# Notify=healthy: auto → from the podman version main.yml reads; render mode assumes podman 5.
+_datastores_notify: >-
+  {{ (datastores_notify_healthy | bool) if datastores_notify_healthy != 'auto'
+     else (_datastores_podman_version | default('5.0') is version('5.0', '>=')) }}
+
+# ── Container definitions (podman_quadlet parameters) ────────────────────────────────
+# One list feeds both render.yml (render mode) and main.yml, so tests render exactly what a
+# host runs. secret_var names the variable holding the value: loop items stay free of secrets.
+_datastores_unit_postgres:
+  name: postgres
+  image: "{{ datastores_postgres_image }}"
+  publish: >-
+    {{ (['127.0.0.1:' ~ datastores_postgres_port ~ ':5432'] if datastores_postgres_publish_local | bool else [])
+       + ([datastores_lan_address ~ ':' ~ datastores_postgres_port ~ ':5432'] if datastores_postgres_publish_lan | bool else []) }}
+  env:
+    POSTGRES_USER: "{{ _datastores_postgres_superuser }}"
+  secret_env: POSTGRES_PASSWORD
+  secret_var: datastores_postgres_superuser_password
+  volumes:
+    - "{{ datastores_data_root }}/postgres:{{ _datastores_postgres_mount }}:Z"
+  ip: "{{ datastores_postgres_ip }}"
+  options: >-
+    {{ ['HealthCmd=pg_isready -h 127.0.0.1 -U ' ~ _datastores_postgres_superuser]
+       + _datastores_health_common + (['Notify=healthy'] if _datastores_notify | bool else [])
+       + ['PodmanArgs=--shm-size=' ~ datastores_postgres_shm_size] }}
+  timeout: 300
+
+_datastores_unit_mysql:
+  name: mysql
+  image: "{{ datastores_mysql_image }}"
+  publish: >-
+    {{ (['127.0.0.1:' ~ datastores_mysql_port ~ ':3306'] if datastores_mysql_publish_local | bool else [])
+       + ([datastores_lan_address ~ ':' ~ datastores_mysql_port ~ ':3306'] if datastores_mysql_publish_lan | bool else []) }}
+  env: {}
+  secret_env: MYSQL_ROOT_PASSWORD
+  secret_var: datastores_mysql_root_password
+  volumes:
+    - "{{ datastores_data_root }}/mysql:{{ _datastores_mysql_mount }}:Z"
+  ip: "{{ datastores_mysql_ip }}"
+  # mysqladmin ping succeeds on any server reply, even "access denied": liveness without a password.
+  options: >-
+    {{ ['HealthCmd=mysqladmin ping -h 127.0.0.1 --silent']
+       + _datastores_health_common + (['Notify=healthy'] if _datastores_notify | bool else []) }}
+  # First start initialises the system schema, much slower than PostgreSQL's initdb.
+  timeout: 600
+
+_datastores_unit_nats:
+  name: nats
+  image: "{{ datastores_nats_image }}"
+  publish: >-
+    {{ (['127.0.0.1:' ~ datastores_nats_port ~ ':4222'] if datastores_nats_publish_local | bool else [])
+       + ([datastores_lan_address ~ ':' ~ datastores_nats_port ~ ':4222'] if datastores_nats_publish_lan | bool else []) }}
+  env: {}
+  volumes: >-
+    {{ [datastores_secrets_dir ~ '/nats.conf:/etc/nats/onebox.conf:ro,Z']
+       + ([datastores_data_root ~ '/nats:/data:Z'] if datastores_nats_jetstream | bool else []) }}
+  ip: "{{ datastores_nats_ip }}"
+  # /healthz on the monitoring port, which listens on the container's loopback only.
+  options: >-
+    {{ ['Exec=--config /etc/nats/onebox.conf',
+        'HealthCmd=wget -q -O /dev/null http://127.0.0.1:8222/healthz']
+       + _datastores_health_common + (['Notify=healthy'] if _datastores_notify | bool else []) }}
+  timeout: 120
+
+_datastores_etcd_advertise: "{{ datastores_etcd_ip if datastores_etcd_ip | length > 0 else 'etcd' }}"
+_datastores_unit_etcd:
+  name: etcd
+  image: "{{ datastores_etcd_image }}"
+  publish: >-
+    {{ (['127.0.0.1:' ~ datastores_etcd_port ~ ':2379'] if datastores_etcd_publish_local | bool else [])
+       + ([datastores_lan_address ~ ':' ~ datastores_etcd_port ~ ':2379'] if datastores_etcd_publish_lan | bool else []) }}
+  # Single member: peers stay on the container's loopback. The advertised client URL is the
+  # fixed address when there is one — clients that sync the member list would otherwise get a
+  # container name that only resolves on the data network.
+  env:
+    ETCD_NAME: etcd
+    ETCD_DATA_DIR: /etcd-data
+    ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+    ETCD_ADVERTISE_CLIENT_URLS: "http://{{ _datastores_etcd_advertise }}:2379"
+    ETCD_LISTEN_PEER_URLS: http://127.0.0.1:2380
+    ETCD_INITIAL_ADVERTISE_PEER_URLS: http://127.0.0.1:2380
+    ETCD_INITIAL_CLUSTER: etcd=http://127.0.0.1:2380
+    ETCD_INITIAL_CLUSTER_STATE: new
+    ETCD_INITIAL_CLUSTER_TOKEN: onebox-etcd
+    # 3.6 turned the --experimental-* corruption checks into feature gates (3.7 removes the
+    # old flags), so this form survives the next minor upgrade.
+    ETCD_FEATURE_GATES: InitialCorruptCheck=true,CompactHashCheck=true
+    ETCD_AUTO_COMPACTION_MODE: periodic
+    ETCD_AUTO_COMPACTION_RETENTION: "{{ datastores_etcd_auto_compaction_retention }}"
+  volumes:
+    - "{{ datastores_data_root }}/etcd:/etcd-data:Z"
+  ip: "{{ datastores_etcd_ip }}"
+  options: >-
+    {{ [] if datastores_etcd_auth_enabled | bool
+       else ['HealthCmd=etcdctl endpoint health'] + _datastores_health_common
+            + (['Notify=healthy'] if _datastores_notify | bool else []) }}
+  timeout: 120
+
+_datastores_units: >-
+  {{ ([_datastores_unit_postgres] if datastores_postgres_enabled | bool else [])
+     + ([_datastores_unit_mysql] if datastores_mysql_enabled | bool else [])
+     + ([_datastores_unit_nats] if datastores_nats_enabled | bool else [])
+     + ([_datastores_unit_etcd] if datastores_etcd_enabled | bool else []) }}
+
+# Redis nodes are generated from datastores_redis_ips (one unit per address) in the tasks.
+_datastores_redis_options_common: >-
+  {{ ['Exec=redis-server /etc/redis/redis.conf', 'HealthCmd=redis-cli -h 127.0.0.1 ping']
+     + _datastores_health_common + (['Notify=healthy'] if _datastores_notify | bool else []) }}
+
+# Directories under datastores_data_root → owner uid. The group stays root: with mode 0700 it
+# grants nothing, and the entrypoints only ever fix the owner, so convergence and the images
+# never take turns changing it.
+_datastores_data_dirs: >-
+  {{ ([{'path': 'postgres', 'uid': datastores_postgres_uid}] if datastores_postgres_enabled | bool else [])
+     + ([{'path': 'mysql', 'uid': datastores_mysql_uid}] if datastores_mysql_enabled | bool else [])
+     + ([{'path': 'nats', 'uid': 0}] if datastores_nats_enabled | bool and datastores_nats_jetstream | bool else [])
+     + ([{'path': 'etcd', 'uid': 0}] if datastores_etcd_enabled | bool else []) }}
+# Unit files of switched-off engines (tasks/absent.yml).
+_datastores_absent_patterns: >-
+  {{ (['postgres.container'] if not datastores_postgres_enabled | bool else [])
+     + (['mysql.container'] if not datastores_mysql_enabled | bool else [])
+     + (['nats.container'] if not datastores_nats_enabled | bool else [])
+     + (['etcd.container'] if not datastores_etcd_enabled | bool else [])
+     + (['redis-*.container'] if not datastores_redis_enabled | bool else []) }}
+# Redis node n: container redis-<n>, data in <data_root>/redis-<n>, config redis-<n>.conf.
+_datastores_redis_nodes: "{{ range(datastores_redis_ips | length) | list if datastores_redis_enabled | bool else [] }}"
+
+# Cluster bus TLS material (tasks/redis_tls.yml).
+_datastores_redis_tls_dir: "{{ datastores_secrets_dir }}/redis-tls"
+
+# redis-cli inside a node, authenticated from the node's own configuration file: the password
+# never passes through Ansible (no no_log needed, errors stay readable).
+_datastores_redis_cli: >-
+  REDISCLI_AUTH="$(awk '$1 == "requirepass" {print $2}' /etc/redis/redis.conf)" redis-cli
+
+# Owners that may create databases themselves (any of their declarations says createdb: true).
+_datastores_pg_createdb_owners: >-
+  {{ datastores_postgres_databases | selectattr('createdb', 'defined') | selectattr('createdb')
+     | map(attribute='owner') | unique | list }}
+
+# Command prefixes for administrative calls (argv form: no shell quoting, nothing in `ps` but
+# names). psql connects through the container's unix socket as the superuser.
+_datastores_psql:
+  - podman
+  - exec
+  - postgres
+  - psql
+  - -v
+  - ON_ERROR_STOP=1
+  - -U
+  - "{{ _datastores_postgres_superuser }}"
+  - -d
+  - postgres
+# etcdctl, authenticated from the root-only env file once auth is on.
+_datastores_etcdctl: >-
+  {{ ['podman', 'exec']
+     + (['--env-file', datastores_secrets_dir ~ '/etcd-root.env'] if datastores_etcd_auth_enabled | bool else [])
+     + ['etcd', 'etcdctl'] }}

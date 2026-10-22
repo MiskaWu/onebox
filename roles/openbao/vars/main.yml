@@ -1,0 +1,79 @@
+---
+# Internal constants and derived values (role vars outrank the inventory: nothing here is a
+# knob; the knobs are in defaults/main.yml).
+
+_openbao_config_dir: "{{ openbao_root }}/config"
+_openbao_data_dir: "{{ openbao_root }}/data"
+_openbao_state_dir: "{{ openbao_root }}/state"
+# Written by the first initialisation. The root token lets every converge re-apply mounts,
+# policies and auth methods; root on this host already holds the seal key and the data, so a
+# root-only token file adds no power that was not there. The recovery key is only needed to
+# mint a new root token; it belongs offline, and converges remind you while it is here.
+_openbao_root_token_file: "{{ _openbao_state_dir }}/root-token"
+_openbao_recovery_file: "{{ _openbao_state_dir }}/recovery-key.json"
+_openbao_api: "http://127.0.0.1:{{ openbao_http_port }}"
+
+# Static seal key: 32 bytes for AES-256-GCM, given as 64 hex characters. The key id must change
+# whenever the key changes; deriving it from the key does that automatically (a hash of the
+# hash: reveals nothing about the key).
+_openbao_seal_key_hex: "{{ openbao_seal_key | hash('sha256') }}"
+_openbao_seal_key_id: "onebox-{{ (openbao_seal_key | hash('sha256') | hash('sha256'))[:12] }}"
+_openbao_seal_previous_key_id: "onebox-{{ (openbao_seal_previous_key | hash('sha256') | hash('sha256'))[:12] }}"
+_openbao_seal_secrets: >-
+  {{ {'BAO_SEAL_KEY': _openbao_seal_key_hex}
+     | combine({'BAO_SEAL_PREVIOUS_KEY': openbao_seal_previous_key | hash('sha256')}
+               if openbao_seal_previous_key | length > 0 else {}) }}
+
+# The OIDC mount path is part of the redirect URI registered at the identity provider
+# (…/ui/vault/auth/oidc/oidc/callback — "vault" is the UI's route, not a typo): a constant.
+_openbao_oidc_mount: oidc
+_openbao_oidc_redirect_uris: "{{ onebox_oidc_clients.openbao.redirect_uris }}"
+
+# Tiers → OIDC roles. Each tier includes the members of the tiers above it.
+_openbao_tiers:
+  - name: admin
+    policy: onebox-admin
+    members: "{{ openbao_oidc_admins | unique }}"
+  - name: writer
+    policy: onebox-writer
+    members: "{{ (openbao_oidc_writers + openbao_oidc_admins) | unique }}"
+  - name: reader
+    policy: onebox-reader
+    members: "{{ (openbao_oidc_readers + openbao_oidc_writers + openbao_oidc_admins) | unique }}"
+
+# Policies (path → capabilities; no secrets). The sys/internal/ui and sys/mounts reads are
+# what the web UI needs to list the secrets engines: without them a user signs in to an empty
+# page with no hint that a permission is missing. External Secrets gets a separate policy
+# without them — a machine needs no UI, and tuning human access must not move machine access.
+_openbao_ui_paths: |
+  path "sys/mounts" { capabilities = ["read"] }
+  path "sys/internal/ui/mounts" { capabilities = ["read"] }
+  path "sys/internal/ui/mounts/*" { capabilities = ["read"] }
+_openbao_policies:
+  - name: onebox-admin
+    # Not root: root-protected endpoints still need the root token.
+    policy: |
+      path "*" {
+        capabilities = ["create", "read", "update", "patch", "delete", "list", "sudo"]
+      }
+  - name: onebox-writer
+    policy: |
+      path "{{ openbao_kv_mount }}/data/*" { capabilities = ["create", "read", "update", "patch", "delete"] }
+      path "{{ openbao_kv_mount }}/metadata/*" { capabilities = ["read", "list", "delete"] }
+      path "{{ openbao_kv_mount }}/delete/*" { capabilities = ["update"] }
+      path "{{ openbao_kv_mount }}/undelete/*" { capabilities = ["update"] }
+      path "{{ openbao_kv_mount }}/destroy/*" { capabilities = ["update"] }
+      {{ _openbao_ui_paths }}
+  # Readers see every value under the mount — not a harmless "list only" tier.
+  - name: onebox-reader
+    policy: |
+      path "{{ openbao_kv_mount }}/data/*" { capabilities = ["read"] }
+      path "{{ openbao_kv_mount }}/metadata/*" { capabilities = ["read", "list"] }
+      {{ _openbao_ui_paths }}
+  # KV v2 reads values at <mount>/data/… and lists keys at <mount>/metadata/…: both are needed.
+  - name: onebox-external-secrets
+    policy: |
+      path "{{ openbao_kv_mount }}/data/*" { capabilities = ["read"] }
+      path "{{ openbao_kv_mount }}/metadata/*" { capabilities = ["read", "list"] }
+
+_openbao_k8s_enabled: "{{ 'external-secrets' in onebox_components }}"

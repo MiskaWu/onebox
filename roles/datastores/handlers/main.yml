@@ -1,0 +1,20 @@
+---
+# Configuration files are bind-mounted, not part of the unit: podman_quadlet cannot see them
+# change, so these restart the engine. Skipped in --check: a first deployment's services do
+# not exist yet.
+- name: Restart redis nodes
+  ansible.builtin.systemd_service:
+    name: "redis-{{ item }}.service"
+    state: restarted
+  loop: "{{ _datastores_redis_nodes }}"
+  when:
+    - not onebox_render_only | bool
+    - not ansible_check_mode
+
+- name: Restart nats
+  ansible.builtin.systemd_service:
+    name: nats.service
+    state: restarted
+  when:
+    - not onebox_render_only | bool
+    - not ansible_check_mode

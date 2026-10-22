@@ -1,4 +1,47 @@
 ---
-# TODO: implemented in a later step.
-- name: Write files
+# OpenBao: files → container → (runtime) initialise once → mounts, policies, auth methods.
+# Everything after the container talks to the live API and is skipped by --check;
+# tasks/status.yml shows what is actually in effect.
+
+- name: Write the directories and the configuration
   ansible.builtin.include_tasks: render.yml
+
+- name: Run the container
+  ansible.builtin.include_tasks: unit.yml
+  vars:
+    _openbao_quadlet_tasks: main.yml
+
+# A finished rotation must not leave the old key in podman's secret store.
+- name: Remove the previous seal key after a rotation
+  ansible.builtin.shell:
+    cmd: >-
+      podman secret exists openbao-bao-seal-previous-key
+      && podman secret rm openbao-bao-seal-previous-key
+    executable: /bin/bash
+  register: _openbao_prev_secret
+  changed_when: _openbao_prev_secret.rc == 0
+  failed_when: false
+  when:
+    - openbao_seal_previous_key | length == 0
+    - not ansible_check_mode
+
+# TokenReview calls go from the container to the API server on the host. Packets from podman's
+# bridge are filtered like any other INPUT traffic; this opens 6443 to the container network
+# only (Kubernetes' API stays closed to the LAN).
+- name: Let the OpenBao container reach the Kubernetes API
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: firewall_open.yml
+  vars:
+    common_fw_rules:
+      - port: "{{ openbao_k8s_api_url | urlsplit('port') | default(443, true) }}"
+        proto: tcp
+        sources: ["{{ openbao_container_cidr }}"]
+  when: _openbao_k8s_enabled | bool
+
+- name: Apply configuration changes before talking to the API
+  ansible.builtin.meta: flush_handlers
+
+- name: Initialise and configure
+  ansible.builtin.include_tasks: configure.yml
+  when: not ansible_check_mode

@@ -18,16 +18,17 @@ upstream client secret is a place to touch when that secret rotates.
   and secrets are the secrets `<name>_oidc_client_id` / `<name>_oidc_client_secret`. When Casdoor
   is enabled, convergence creates the applications. **Never create them by hand:** the UI
   generates its own client ID and secret, and services end up holding a pair the identity
-  provider does not know. Casdoor's init data creates missing objects but does not overwrite
-  existing ones, so changes to existing objects need an explicit API step.
+  provider does not know. Casdoor's init data runs in merge mode (4.18+), so declarations are
+  converged on every start — existing objects included.
 - **Why a broker:** when the upstream client secret rotates, only the broker changes; services
   (some of which reconfigure slowly) are untouched. Accepted cost: one more stateful component —
   single sign-on is down while it is down.
-- **The identity provider is internal-only.** With Casdoor, local self-sign-up and upstream
-  auto-provisioning share one switch; the sign-up API accepts arbitrary, unverified email
-  addresses and can even return an authorisation code, bypassing any upstream tenant
-  restriction; hiding the password form is cosmetic. The network boundary
-  ([0006](0006-internal-only-by-default.md)) is the real control.
+- **The identity provider is internal-only.** Older Casdoor releases tied local self-sign-up
+  and upstream auto-provisioning to one switch, and the sign-up API accepted arbitrary,
+  unverified email addresses — even returning an authorisation code that bypassed any upstream
+  tenant restriction. Since 4.19 they are separate switches and onebox disables self-sign-up
+  outright, but the network boundary ([0006](0006-internal-only-by-default.md)) stays the real
+  control: hiding a form is cosmetic, an unreachable endpoint is not.
 - **Client secrets are administrator keys** in the threat model: with Casdoor, any application's
   client secret authenticates to its management API as a global administrator.
 - **The built-in organisation is for named administrators only.** Users auto-provisioned through
@@ -41,10 +42,10 @@ upstream client secret is a place to touch when that secret rotates.
   that has no account yet can be claimed through self-sign-up. Grant only to people who have
   signed in once (the grant command says so in its output); move to group-based authorisation
   when the list grows.
-- **The administrator's default password is rotated immediately after install.** The
-  set-password call is not idempotent (it rejects "new equals current"), so it is an operation
-  target, not part of convergence. If an identity-provider vhost is ever made public, require an
-  explicit "admin password rotated" flag first.
+- **No default-password window.** The administrator's first password comes from the secrets
+  file (`initAdminPassword`, 4.19+) instead of the vendor default followed by a rotation step —
+  the old set-password call was not idempotent and needed its own operation target. Making an
+  identity-provider vhost public still requires an explicit flag (`casdoor_allow_public`).
 
 ## Consequences
 

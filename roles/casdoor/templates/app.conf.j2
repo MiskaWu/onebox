@@ -1,0 +1,48 @@
+# Managed by onebox (roles/casdoor) — edits are overwritten on the next converge.
+# Mounted read-only at /conf/app.conf. No secrets in here: the DSN, the first admin password
+# and the RADIUS secret arrive as podman secrets in environment variables of the same names,
+# which Casdoor reads before this file.
+appname = casdoor
+httpport = 8000
+runmode = prod
+copyrequestbody = true
+
+driverName = postgres
+dataSourceName =
+dbName = {{ casdoor_db_name }}
+tableNamePrefix =
+showSql = false
+
+# The issuer every client validates is derived from this: it must equal onebox_oidc_issuer
+# exactly, or discovery and token validation fail in every service.
+origin = "https://{{ casdoor_hostname }}"
+originFrontend =
+staticBaseUrl = "https://cdn.casbin.org"
+isDemoMode = false
+enableErrorMask = true
+enableGzip = true
+logPostOnly = true
+isUsernameLowered = false
+redisEndpoint =
+defaultStorageProvider =
+isCloudIntranet = false
+authState = "casdoor"
+socks5Proxy =
+verificationCodeTimeout = 10
+initScore = 0
+batchSize = 100
+defaultLanguage = "en"
+defaultApplication = "app-built-in"
+
+# Built-in LDAP server off (port 0); RADIUS cannot be switched off in this version, see
+# vars/main.yml. Neither port is published.
+ldapServerPort = 0
+ldapsServerPort = 0
+radiusServerPort = 1812
+
+# Declarative objects (templates/init_data.json.j2). initDataFile must be set here: this file
+# replaces the image's own app.conf, and without the key the init data is silently ignored.
+# Merge mode converges existing objects on every start; newOnly would only ever create.
+initDataFile = "/conf/init_data.json"
+initDataNewOnly = false
+initDataMerge = true

@@ -1,0 +1,64 @@
+---
+# Casdoor's login role and database, in the shared PostgreSQL (shared mode) or in its own
+# container (dedicated mode, where the role is that container's superuser). Administration
+# runs through the container's unix socket, which the image trusts locally; the password check
+# connects to the container's own name, where pg_hba requires scram-sha-256 (127.0.0.1 inside
+# the container is "trust" and would accept anything). Passwords travel on stdin only.
+
+- name: Wait for PostgreSQL to accept TCP connections
+  ansible.builtin.command:
+    argv: [podman, exec, "{{ _casdoor_db_container }}", pg_isready, -h, 127.0.0.1, -U, "{{ _casdoor_db_superuser }}"]
+  register: _casdoor_pg_ready
+  until: _casdoor_pg_ready.rc == 0
+  retries: 60
+  delay: 2
+  changed_when: false
+
+- name: Check the Casdoor role's password
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - -i
+      - "{{ _casdoor_db_container }}"
+      - sh
+      - -c
+      - 'PGPASSWORD="$(cat)" psql -h "$1" -U "$2" -d postgres -tAc "select 1"'
+      - sh
+      - "{{ _casdoor_db_container }}"
+      - "{{ casdoor_db_user }}"
+    stdin: "{{ casdoor_db_password }}"
+  register: _casdoor_pg_login
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+# Creating and rotating take the same path; "changed" means the check above failed.
+- name: Create the Casdoor role or set its password
+  ansible.builtin.command:
+    argv: "{{ _casdoor_psql[:2] + ['-i'] + _casdoor_psql[2:] + ['-q'] }}"
+    stdin: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ casdoor_db_user }}') THEN
+          CREATE ROLE "{{ casdoor_db_user }}" LOGIN;
+        END IF;
+      END
+      $$;
+      ALTER ROLE "{{ casdoor_db_user }}" WITH LOGIN PASSWORD '{{ casdoor_db_password | replace("'", "''") }}';
+  changed_when: true
+  no_log: true
+  when: _casdoor_pg_login.rc != 0
+
+- name: Look for the Casdoor database
+  ansible.builtin.command:
+    argv: "{{ _casdoor_psql + ['-tAc', 'SELECT datname FROM pg_database'] }}"
+  register: _casdoor_pg_dbs
+  changed_when: false
+
+# Owned by the Casdoor role: it creates and migrates its own tables, no grants needed.
+- name: Create the Casdoor database
+  ansible.builtin.command:
+    argv: "{{ _casdoor_psql + ['-c', 'CREATE DATABASE \"' ~ casdoor_db_name ~ '\" OWNER \"' ~ casdoor_db_user ~ '\"'] }}"
+  changed_when: true
+  when: casdoor_db_name not in _casdoor_pg_dbs.stdout_lines

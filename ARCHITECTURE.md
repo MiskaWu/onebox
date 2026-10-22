@@ -240,7 +240,7 @@ make <target>                     the only human interface (ADR 0003)
   └─ deploy.sh <command>          bash only; resolves inventories/<env>; installs ansible-core
        └─ ansible-playbook site.yml -i inventories/<env> [--tags <component>] [--check --diff]
             preflight (always) → common → storage → operators → tailscale → edge → datastores →
-            openbao → casdoor → gitlab → gitlab-runner → k3s → k3s-gateway →
+            k3s → casdoor → openbao → gitlab → gitlab-runner → k3s-gateway →
             external-secrets → argocd → argo-rollouts
 ```
 

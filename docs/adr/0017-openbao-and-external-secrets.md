@@ -36,10 +36,11 @@ has never heard of.
   the server's declarative self-initialisation, which runs once and cannot be changed afterwards
   without wiping storage. Splitting the work between the two would mean two declarations of one
   thing, synchronised by hand. The root token stays in a root-only init file.
-- **Integrated raft storage,** not `file`: upstream has announced moving the `file` backend and
-  several auto-unseal mechanisms out of the standard binary. Before crossing such a release,
-  check that the configured seal type is still built in — a store that cannot unseal stops every
-  application's secret delivery.
+- **Integrated raft storage:** OpenBao 2.7 removed the `file` backend and moved the cloud-KMS
+  and PKCS#11 seals into plugins; the static seal is still built in (verified). Before crossing
+  a release, check that the configured seal type still ships in the binary — a store that
+  cannot unseal stops every application's secret delivery. Audit devices are declared in the
+  server configuration file (the only place 2.7 accepts them).
 - **External Secrets authenticates with Kubernetes auth and no stored reviewer token:** OpenBao
   validates the client's own service-account token through TokenReview, which needs
   `system:auth-delegator` for that service account. No long-lived static credential exists in

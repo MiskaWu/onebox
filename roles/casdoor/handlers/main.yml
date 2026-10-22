@@ -1,0 +1,11 @@
+---
+# app.conf and the init data are bind-mounted, not part of the unit: podman_quadlet cannot see
+# them change. A restart is also what makes Casdoor re-apply the init data (merge mode).
+# Skipped in --check, where a first deployment's service does not exist yet.
+- name: Restart casdoor
+  ansible.builtin.systemd_service:
+    name: casdoor.service
+    state: restarted
+  when:
+    - not onebox_render_only | bool
+    - not ansible_check_mode

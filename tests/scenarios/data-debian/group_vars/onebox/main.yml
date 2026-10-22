@@ -1,0 +1,18 @@
+---
+# Data layer on Debian/Ubuntu with the defaults: PostgreSQL + Redis only, Casdoor on a
+# dedicated database, OpenBao trusting an external identity provider, no host firewall
+# management, podman without Notify=healthy (Ubuntu 24.04 ships podman 4.9).
+onebox_env: test
+onebox_os_family: Debian
+onebox_domain: lab.example.test
+onebox_host_ip: 198.51.100.20
+onebox_lan_cidrs: [198.51.100.0/24]
+onebox_data_subnet: 10.77.0.0/16
+onebox_components:
+  - edge
+  - datastores
+  - openbao
+  - casdoor
+common_firewall_backend: none
+edge_tls_mode: acme_dns
+edge_dns_provider: cloudflare

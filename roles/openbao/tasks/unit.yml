@@ -1,0 +1,32 @@
+---
+# The OpenBao container. render.yml runs it with podman_quadlet's render.yml, main.yml with
+# its main.yml; both read these parameters.
+- name: OpenBao container
+  ansible.builtin.include_role:
+    name: podman_quadlet
+    tasks_from: "{{ _openbao_quadlet_tasks }}"
+  vars:
+    podman_quadlet_name: openbao
+    podman_quadlet_image: "{{ openbao_image }}"
+    podman_quadlet_publish: ["127.0.0.1:{{ openbao_http_port }}:8200"]
+    # For `podman exec openbao bao …` and the health check: the client defaults to https.
+    podman_quadlet_env:
+      BAO_ADDR: http://127.0.0.1:8200
+    # Seal keys as podman secrets (env://BAO_SEAL_KEY in the configuration), never in a file
+    # next to the data or in the unit.
+    podman_quadlet_secrets: "{{ _openbao_seal_secrets }}"
+    podman_quadlet_volumes:
+      - "{{ _openbao_config_dir }}/onebox.hcl:/openbao/config/onebox.hcl:ro,Z"
+      - "{{ _openbao_data_dir }}:/openbao/data:Z"
+    # `server` makes the image's entrypoint run `bao server -config=/openbao/config` (the
+    # -dev-* flags it also passes are inert without -dev). Healthy = initialised and unsealed;
+    # no Notify=healthy: before the first initialisation the server is never healthy, and the
+    # unit would time out before main.yml gets to initialise it.
+    podman_quadlet_options:
+      - Exec=server
+      - HealthCmd=bao status
+      - HealthInterval=15s
+      - HealthTimeout=5s
+      - HealthRetries=3
+      - HealthStartPeriod=30s
+    podman_quadlet_timeout_start: 120

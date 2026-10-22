@@ -1,0 +1,77 @@
+---
+# etcd role-based access: a root user with the root role, then `auth enable`. Converges in
+# both directions with datastores_etcd_auth_enabled. etcd's image is distroless (no shell),
+# so every call is argv. The root password never becomes an argument: it goes in on stdin
+# once (user add), and later calls read it with `podman exec --env-file` from the root-only
+# etcd-root.env that render.yml writes — so those tasks need no no_log and show their errors.
+
+# Without credentials `auth status` answers while auth is off, and is refused with
+# "user name is empty" once it is on — both are answers; anything else is an error.
+- name: Read the authentication status
+  ansible.builtin.command:
+    argv: [podman, exec, etcd, etcdctl, auth, status]
+  register: _datastores_etcd_auth
+  until: _datastores_etcd_auth.rc == 0 or 'user name is empty' in _datastores_etcd_auth.stderr
+  retries: 30
+  delay: 2
+  changed_when: false
+  failed_when:
+    - _datastores_etcd_auth.rc != 0
+    - "'user name is empty' not in _datastores_etcd_auth.stderr"
+
+- name: Enable authentication (first converge, or after it was switched off)
+  when:
+    - datastores_etcd_auth_enabled | bool
+    - "'Authentication Status: false' in _datastores_etcd_auth.stdout"
+  block:
+    # Each step tolerates "already exists", so an interrupted bootstrap converges on a re-run.
+    - name: Create the root role
+      ansible.builtin.command:
+        argv: [podman, exec, etcd, etcdctl, role, add, root]
+      register: _datastores_etcd_role
+      changed_when: _datastores_etcd_role.rc == 0
+      failed_when:
+        - _datastores_etcd_role.rc != 0
+        - "'already exists' not in _datastores_etcd_role.stderr"
+
+    - name: Create the root user
+      ansible.builtin.command:
+        argv: [podman, exec, -i, etcd, etcdctl, user, add, root, --interactive=false]
+        stdin: "{{ datastores_etcd_root_password }}"
+      register: _datastores_etcd_user
+      changed_when: _datastores_etcd_user.rc == 0
+      failed_when:
+        - _datastores_etcd_user.rc != 0
+        - "'already exists' not in _datastores_etcd_user.stderr"
+      no_log: true
+
+    - name: Grant the root role to the root user
+      ansible.builtin.command:
+        argv: [podman, exec, etcd, etcdctl, user, grant-role, root, root]
+      register: _datastores_etcd_grant
+      changed_when: _datastores_etcd_grant.rc == 0
+      failed_when:
+        - _datastores_etcd_grant.rc != 0
+        - "'already' not in _datastores_etcd_grant.stderr"
+
+    - name: Turn authentication on
+      ansible.builtin.command:
+        argv: [podman, exec, etcd, etcdctl, auth, enable]
+      changed_when: true
+
+- name: Turn authentication off (datastores_etcd_auth_enabled is false)
+  ansible.builtin.command:
+    argv: [podman, exec, --env-file, "{{ datastores_secrets_dir }}/etcd-root.env", etcd, etcdctl, auth, disable]
+  changed_when: true
+  when:
+    - not datastores_etcd_auth_enabled | bool
+    - "'user name is empty' in _datastores_etcd_auth.stderr"
+
+- name: Verify the authentication status
+  ansible.builtin.command:
+    argv: [podman, exec, etcd, etcdctl, auth, status]
+  register: _datastores_etcd_auth_after
+  changed_when: false
+  failed_when: >-
+    (datastores_etcd_auth_enabled | bool and 'user name is empty' not in _datastores_etcd_auth_after.stderr)
+    or (not datastores_etcd_auth_enabled | bool and 'Authentication Status: false' not in _datastores_etcd_auth_after.stdout)

@@ -1,0 +1,97 @@
+---
+# MySQL steps that need the running server. Root authenticates inside the container from the
+# MYSQL_ROOT_PASSWORD podman secret (`podman exec` sees the container's secret environment), so
+# no password reaches a command line. Application passwords travel on stdin.
+
+- name: Wait for MySQL to accept TCP connections
+  ansible.builtin.command:
+    argv: [podman, exec, mysql, mysqladmin, ping, -h, 127.0.0.1, --silent]
+  register: _datastores_mysql_ready
+  until: _datastores_mysql_ready.rc == 0
+  retries: 90
+  delay: 2
+  changed_when: false
+
+# Unlike PostgreSQL there is no password-free administrative path to repair a mismatch: the
+# image applies MYSQL_ROOT_PASSWORD only on first initialisation, and root needs a password.
+- name: Check the root password
+  ansible.builtin.command:
+    argv: [podman, exec, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root -N -e "select 1"']
+  register: _datastores_mysql_root_login
+  changed_when: false
+  failed_when: false
+
+- name: Fail when the root password in secrets.yml is not the database's
+  ansible.builtin.assert:
+    that:
+      - _datastores_mysql_root_login.rc == 0
+    fail_msg: >-
+      MySQL rejects datastores_mysql_root_password. The image only applies it when it creates an
+      empty database, so a rotated value never reaches an existing one. Set the new password in
+      MySQL first (ALTER USER 'root'@'%' and 'root'@'localhost'), then in secrets.yml — or put the
+      old value back. Error: {{ _datastores_mysql_root_login.stderr | default('') | trim }}
+    quiet: true
+
+- name: Check the application users' passwords
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - -i
+      - mysql
+      - sh
+      - -c
+      - 'MYSQL_PWD="$(cat)" mysql -h mysql -u "$1" -N -e "select 1"'
+      - sh
+      - "{{ item.owner }}"
+    stdin: "{{ lookup('ansible.builtin.vars', item.password_var) }}"
+  loop: "{{ datastores_mysql_databases | unique(attribute='owner') }}"
+  loop_control:
+    label: "{{ item.owner }}"
+  register: _datastores_mysql_user_login
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Create the application users or set their passwords
+  ansible.builtin.command:
+    argv: [podman, exec, -i, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root']
+    stdin: |
+      {% set _pw = lookup('ansible.builtin.vars', item.item.password_var) | replace('\\', '\\\\') | replace("'", "\\'") %}
+      CREATE USER IF NOT EXISTS '{{ item.item.owner }}'@'%' IDENTIFIED BY '{{ _pw }}';
+      ALTER USER '{{ item.item.owner }}'@'%' IDENTIFIED BY '{{ _pw }}';
+  loop: "{{ _datastores_mysql_user_login.results }}"
+  loop_control:
+    label: "{{ item.item.owner }}"
+  changed_when: true
+  no_log: true
+  when: item.rc != 0
+
+- name: List the existing databases
+  ansible.builtin.command:
+    argv: [podman, exec, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root -N -e "SHOW DATABASES"']
+  register: _datastores_mysql_dbs
+  changed_when: false
+  when: datastores_mysql_databases | length > 0
+
+# Names are validated in preflight.yml ([a-z_][a-z0-9_]*), so they can be written into SQL.
+- name: Create the missing application databases
+  ansible.builtin.command:
+    argv: [podman, exec, -i, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root']
+    stdin: "CREATE DATABASE IF NOT EXISTS `{{ item.name }}` CHARACTER SET utf8mb4;"
+  loop: "{{ datastores_mysql_databases }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: true
+  when: item.name not in _datastores_mysql_dbs.stdout_lines
+
+# MySQL has no database ownership: the owner gets every privilege on its own database only.
+# GRANT is idempotent but does not say whether it added anything, hence changed_when: false.
+- name: Grant each owner its database
+  ansible.builtin.command:
+    argv: [podman, exec, -i, mysql, sh, -c, 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root']
+    stdin: "GRANT ALL PRIVILEGES ON `{{ item.name }}`.* TO '{{ item.owner }}'@'%';"
+  loop: "{{ datastores_mysql_databases }}"
+  loop_control:
+    label: "{{ item.owner }} → {{ item.name }}"
+  changed_when: false
