@@ -1,0 +1,13 @@
+---
+# Operation (make edge-root-ca): print the root certificate of Caddy's internal CA, which
+# clients must trust when edge_tls_mode is internal.
+- name: Read the internal CA root
+  ansible.builtin.slurp:
+    src: "{{ onebox_edge_ca_file }}"
+  register: _edge_root_ca
+  when: edge_tls_mode == 'internal'
+
+- name: Internal CA root (install it in your browser / OS trust store)
+  ansible.builtin.debug:
+    msg: "{{ (_edge_root_ca.content | b64decode).splitlines() if edge_tls_mode == 'internal'
+             else 'edge_tls_mode is ' ~ edge_tls_mode ~ ': certificates are publicly trusted or yours' }}"

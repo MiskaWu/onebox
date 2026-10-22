@@ -78,18 +78,31 @@ do_syntax() {
   done
 }
 
+render_one() { # scenario → writes <out>.log and <out>.rc
+  local s="$1" out="${RENDER_ROOT}/$1"
+  rm -rf "$out"
+  mkdir -p "$out"
+  ansible-playbook -i "tests/scenarios/${s}" tests/render.yml -e "onebox_root=${out}" >"${out}.log" 2>&1
+  echo $? >"${out}.rc"
+}
+
+# Scenarios are independent: render them in parallel (RENDER_JOBS, default: CPU count).
 do_render() {
-  local s out
-  for s in $(scenarios); do
-    step "render: ${s}"
+  local s out jobs="${RENDER_JOBS:-$(nproc)}" list=()
+  mapfile -t list < <(scenarios)
+  step "render: ${#list[@]} scenarios, ${jobs} at a time"
+  mkdir -p "$RENDER_ROOT"
+  for s in "${list[@]}"; do
+    while [[ $(jobs -rp | wc -l) -ge $jobs ]]; do wait -n || true; done
+    render_one "$s" &
+  done
+  wait
+  for s in "${list[@]}"; do
     out="${RENDER_ROOT}/${s}"
-    rm -rf "$out"
-    mkdir -p "$out"
-    if ansible-playbook -i "tests/scenarios/${s}" tests/render.yml \
-        -e "onebox_root=${out}" >"${out}.log" 2>&1; then
-      ok "$(find "$out" -type f | wc -l) files → ${out}"
+    if [[ "$(cat "${out}.rc" 2>/dev/null)" == 0 ]]; then
+      ok "${s}: $(find "$out" -type f | wc -l) files"
     else
-      bad "render failed, see ${out}.log"
+      bad "${s}: render failed, see ${out}.log"
       tail -n 30 "${out}.log" | sed 's/^/      /'
     fi
   done
@@ -154,6 +167,33 @@ validate_caddy() { # render dir
   fi
 }
 
+# Units the roles write directly (not through Quadlet). Binaries do not exist on the test
+# machine, so "is not executable" is expected; anything else systemd says is a defect.
+validate_systemd() { # render dir
+  local files=() out
+  mapfile -t files < <(find "$1/etc/systemd/system" -maxdepth 1 -type f \( -name '*.service' -o -name '*.mount' -o -name '*.timer' \) 2>/dev/null | sort)
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  if ! command -v systemd-analyze >/dev/null 2>&1; then
+    echo "  skip  systemd-analyze not installed"
+    return 0
+  fi
+  out="$(systemd-analyze verify --man=no "${files[@]}" 2>&1 | grep -v 'is not executable: No such file or directory' || true)"
+  if [[ -z "$out" ]]; then
+    ok "systemd-analyze verify (${#files[@]} units)"
+  else
+    bad "systemd-analyze verify"
+    head -n 15 <<<"$out" | sed 's/^/      /'
+  fi
+}
+
+validate_sudoers() { # render dir
+  local f
+  for f in "$1"/etc/sudoers.d/*; do
+    [[ -f "$f" ]] || continue
+    if visudo -cf "$f" >/dev/null 2>&1; then ok "visudo ${f##*/}"; else bad "visudo ${f##*/}"; visudo -cf "$f" 2>&1 | sed 's/^/      /'; fi
+  done
+}
+
 validate_k8s() { # render dir
   local files=()
   mapfile -t files < <(find "$1" -type f -path '*/manifests/*' \( -name '*.yaml' -o -name '*.yml' \) | sort)
@@ -191,6 +231,8 @@ do_validate() {
     step "validate: ${s}"
     validate_quadlet "${RENDER_ROOT}/${s}"
     validate_caddy "${RENDER_ROOT}/${s}"
+    validate_systemd "${RENDER_ROOT}/${s}"
+    validate_sudoers "${RENDER_ROOT}/${s}"
     validate_k8s "${RENDER_ROOT}/${s}"
   done
   validate_examples

@@ -1,0 +1,24 @@
+---
+# Run one operation (a task file inside a role) on the onebox host:
+#
+#   ./deploy.sh op <role> <task> [-e …]     e.g. ./deploy.sh op datastores status
+#
+# Operations live next to the code they operate on (roles/<role>/tasks/<task>.yml) and are
+# exposed to humans as make targets (see the Makefile's "Operations" section).
+- name: Run a role operation
+  hosts: onebox
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Assert which operation to run
+      ansible.builtin.assert:
+        that:
+          - onebox_op_role | default('') | length > 0
+          - onebox_op_task | default('') | length > 0
+        fail_msg: "usage: ./deploy.sh op <role> <task>"
+        quiet: true
+
+    - name: Run the operation
+      ansible.builtin.include_role:
+        name: "{{ onebox_op_role }}"
+        tasks_from: "{{ onebox_op_task }}.yml"

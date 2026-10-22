@@ -89,6 +89,70 @@ $(COMPONENTS):
 	$(no_tags)
 	$(DEPLOY) apply --tags $@
 
+# ── Operations ─────────────────────────────────────────────────────────────────────
+# Ansible-driven (work from a control machine too):
+.PHONY: edge-root-ca datastores-status datastores-reset datastores-reset-confirm \
+        openbao-status openbao-backup argocd-password k3s-uninstall k3s-uninstall-confirm \
+        tailscale-uninstall tailscale-uninstall-confirm
+edge-root-ca: ## Print the internal CA root (edge_tls_mode: internal)
+	$(no_tags)
+	$(DEPLOY) op caddy_edge root_ca
+datastores-status: ## Engines, health, databases
+	$(no_tags)
+	$(DEPLOY) op datastores status
+datastores-reset: ## PREVIEW wiping app data (protect list kept)
+	$(no_tags)
+	$(DEPLOY) op datastores reset
+datastores-reset-confirm: ## Wipe app data in every datastore (protect list kept)
+	$(no_tags)
+	$(DEPLOY) op datastores reset -e datastores_reset_confirm=true
+openbao-status: ## Seal state, raft peers, auth methods
+	$(no_tags)
+	$(DEPLOY) op openbao status
+openbao-backup: ## Raft snapshot (verified, rotated)
+	$(no_tags)
+	$(DEPLOY) op openbao backup
+argocd-password: ## Argo CD initial admin password
+	$(no_tags)
+	$(DEPLOY) op argocd password
+k3s-uninstall: ## PREVIEW removing k3s and everything in the cluster
+	$(no_tags)
+	$(DEPLOY) run k3s-uninstall
+k3s-uninstall-confirm: ## Remove k3s (ENV must be given and match)
+	$(no_tags)
+	@test -n "$(ENV)" || { echo "pass ENV=<name> to confirm which environment loses its cluster" >&2; exit 1; }
+	$(DEPLOY) run k3s-uninstall -e k3s_uninstall_confirm=$(ENV)
+tailscale-uninstall: ## PREVIEW leaving the tailnet and removing Tailscale
+	$(no_tags)
+	$(DEPLOY) run tailscale-uninstall
+tailscale-uninstall-confirm: ## Leave the tailnet and remove Tailscale
+	$(no_tags)
+	$(DEPLOY) run tailscale-uninstall -e tailscale_uninstall_confirm=true
+
+# Host-local (run them on the onebox host itself):
+.PHONY: gitlab-logs gitlab-reconfigure gitlab-backup gitlab-root-password gitlab-mail-test \
+        gitlab-runner-logs gitlab-runner-prune tailscale-status operator-password
+gitlab-logs: ## Follow GitLab's logs
+	podman logs -f --tail 100 gitlab
+gitlab-reconfigure: ## Re-apply gitlab.rb inside the running container
+	podman exec gitlab gitlab-ctl reconfigure
+gitlab-backup: ## Run the GitLab backup unit now
+	systemctl start gitlab-backup && journalctl -u gitlab-backup -n 30 --no-pager
+gitlab-root-password: ## Reset the GitLab root password (interactive)
+	podman exec -it gitlab gitlab-rake "gitlab:password:reset[root]"
+gitlab-mail-test: ## Send a test mail (TO=<address>)
+	@test -n "$(TO)" || { echo "usage: make gitlab-mail-test TO=<address>" >&2; exit 1; }
+	podman exec gitlab gitlab-rails runner "Notify.test_email('$(TO)', 'onebox mail test', 'It works.').deliver_now"
+gitlab-runner-logs: ## Follow the runner's logs
+	journalctl -u gitlab-runner -f
+gitlab-runner-prune: ## Prune the runner's images and containers now
+	systemctl start gitlab-runner-prune && journalctl -u gitlab-runner-prune -n 20 --no-pager
+tailscale-status: ## Tailnet state and preferences
+	tailscale status; tailscale debug prefs
+operator-password: ## Set an operator's password, force change at next login (OP=<account>)
+	@test -n "$(OP)" || { echo "usage: sudo make operator-password OP=<account>" >&2; exit 1; }
+	passwd $(OP) && chage -d 0 $(OP)
+
 # ── Development ────────────────────────────────────────────────────────────────────
 
 .PHONY: tools test lint render

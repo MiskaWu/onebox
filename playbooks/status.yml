@@ -1,0 +1,67 @@
+---
+# `make status`: one screen with the state of every enabled component. Read-only.
+- name: Show the state of the enabled components
+  hosts: onebox
+  become: true
+  gather_facts: false
+  vars:
+    # component → systemd units it owns (datastores and Casdoor's database vary: see
+    # `make datastores-status` for the engine-level view)
+    _status_units:
+      edge: [caddy]
+      openbao: [openbao]
+      casdoor: [casdoor]
+      gitlab: [gitlab]
+      gitlab-runner: [gitlab-runner]
+      k3s: [k3s]
+      tailscale: [tailscaled]
+  tasks:
+    - name: Read the unit states
+      ansible.builtin.command: systemctl is-active {{ item.value | join(' ') }}
+      loop: "{{ _status_units | dict2items | selectattr('key', 'in', onebox_components) }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: _status_active
+      changed_when: false
+      failed_when: false
+
+    - name: Unit states
+      ansible.builtin.debug:
+        msg: >-
+          {{ _status_active.results
+             | map(attribute='item.key')
+             | zip(_status_active.results | map(attribute='stdout_lines') | map('join', ', '))
+             | map('join', ': ') | list }}
+
+    - name: Read the containers
+      ansible.builtin.command: podman ps -a --format "{{ '{{' }}.Names{{ '}}' }}  {{ '{{' }}.Status{{ '}}' }}"
+      register: _status_podman
+      changed_when: false
+      failed_when: false
+
+    - name: Containers
+      ansible.builtin.debug:
+        msg: "{{ _status_podman.stdout_lines }}"
+
+    - name: Cluster
+      when: "'k3s' in onebox_components"
+      block:
+        - name: Read the node, unhealthy pods and failed chart installs
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              k3s kubectl get nodes -o wide
+              echo '--- pods not Running/Completed:'
+              k3s kubectl get pods -A --no-headers | awk '$4 != "Running" && $4 != "Completed"' || true
+              echo '--- helm charts:'
+              k3s kubectl get helmcharts -A --no-headers 2>/dev/null || true
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ k3s_kubeconfig }}"
+          register: _status_k3s
+          changed_when: false
+          failed_when: false
+
+        - name: Kubernetes
+          ansible.builtin.debug:
+            msg: "{{ _status_k3s.stdout_lines }}"
